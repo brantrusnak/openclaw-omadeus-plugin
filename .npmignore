@@ -1,0 +1,7 @@
+# Tests (not needed in published package)
+**/*.test.ts
+
+# Internal / contributor documentation
+AGENTS.md
+FLOW.md
+CLAUDE.md
