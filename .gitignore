@@ -6,7 +6,7 @@ dist-runtime
 pnpm-lock.yaml
 bun.lock
 bun.lockb
-package-lock.json
+
 /memory/
 .agent/*.json
 !.agent/workflows/
