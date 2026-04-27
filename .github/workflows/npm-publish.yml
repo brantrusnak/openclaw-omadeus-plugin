@@ -44,8 +44,7 @@ jobs:
         if: steps.version.outputs.changed == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org/
+          node-version: 24
 
       - name: Setup pnpm
         if: steps.version.outputs.changed == 'true'
@@ -63,4 +62,6 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.changed == 'true'
-        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ""
+        run: npm publish --provenance --access public
