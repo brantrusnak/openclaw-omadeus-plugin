@@ -16,8 +16,11 @@
   "type": "module",
   "main": "./index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "prepack": "node ./scripts/verify-npm-files.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
   },
   "files": [
     "index.ts",
@@ -29,7 +32,8 @@
     "!**/*.test.ts"
   ],
   "devDependencies": {
-    "openclaw": ">=2026.4.10"
+    "openclaw": ">=2026.4.10",
+    "vitest": "^4.1.5"
   },
   "peerDependencies": {
     "openclaw": ">=2026.4.10"

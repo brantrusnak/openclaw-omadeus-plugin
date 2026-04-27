@@ -310,7 +310,6 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       await prompter.text({
         message: "Omadeus password",
         initialValue: section.password ?? envPassword,
-        sensitive: true,
         validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
       }),
     ).trim();
@@ -363,7 +362,6 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
           await prompter.text({
             message: "Omadeus password",
             initialValue: password,
-            sensitive: true,
             validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
           }),
         ).trim();
