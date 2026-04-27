@@ -1,205 +1,128 @@
 # Omadeus Plugin Flow
 
-This document explains how `extensions/omadeus` integrates with OpenClaw, how messages flow in and out, and where to add custom actions later.
+This document describes the current flow for `@brantrusnak/openclaw-omadeus`.
 
-## 1) How OpenClaw Loads The Plugin
+## Load And Runtime
 
-OpenClaw discovers the Omadeus extension from `extensions/omadeus/package.json`:
+OpenClaw discovers the plugin from `package.json`:
 
-- `openclaw.extensions` points to `./index.ts`
-- `openclaw.setupEntry` points to `./setup-entry.ts`
+- `openclaw.extensions` loads `./index.ts`.
+- `openclaw.setupEntry` loads `./setup-entry.ts`.
+- `openclaw.channel` provides channel picker metadata.
 
-Entry files:
+`index.ts` exports `omadeusPlugin` and `setOmadeusRuntime`, then default-exports `defineChannelPluginEntry(...)`. `setup-entry.ts` default-exports `defineSetupPluginEntry(omadeusPlugin)`. Runtime services are stored by `src/runtime.ts` and read through `getOmadeusRuntime()` where shared OpenClaw helpers are needed.
 
-- `extensions/omadeus/index.ts`
-  - uses `defineChannelPluginEntry(...)`
-  - exports `omadeusPlugin` and `setOmadeusRuntime`
-- `extensions/omadeus/setup-entry.ts`
-  - uses `defineSetupPluginEntry(omadeusPlugin)`
+## Main Plugin Contract
 
-The runtime setter in `extensions/omadeus/src/runtime.ts` stores OpenClaw runtime services so Omadeus code can use shared routing/session/reply helpers.
+`src/channel.ts` defines `omadeusPlugin`. It is the main integration point OpenClaw calls.
 
-### TL;DR
+- `capabilities` declares direct/group chat, reactions, no threads/media/native commands, and block streaming.
+- `agentPrompt` teaches the agent Omadeus target and action conventions.
+- `actions` exposes and handles message-tool actions.
+- `reload` watches `channels.omadeus` config changes.
+- `setup` and `setupWizard` provide configuration flows.
+- `config` resolves account state and status-friendly account descriptions.
+- `messaging.targetResolver` normalizes room and task-like targets.
+- `outbound` validates targets, chunks text, and sends messages.
+- `status` builds channel/account health snapshots.
+- `gateway.startAccount` authenticates, connects sockets, and starts inbound processing.
 
-- OpenClaw loads Omadeus via `package.json` metadata.
-- `index.ts` registers channel behavior.
-- `setup-entry.ts` registers setup behavior.
-- Runtime is injected once and read from `src/runtime.ts`.
+## Gateway Startup
 
-## 2) Main Plugin Contract
+`gateway.startAccount` in `src/channel.ts` is the runtime boot path.
 
-The plugin definition lives in `extensions/omadeus/src/channel.ts` as `omadeusPlugin`.
+1. Resolve the configured Omadeus account.
+2. Skip startup when credentials are missing or no password/session token is available.
+3. Create `src/token.ts` token manager and perform initial auth.
+4. Persist refreshed session tokens back to `channels.omadeus.sessionToken`.
+5. Build an inbound handler with `src/message-handler.ts`.
+6. Connect Jaguar chat socket with `src/socket/jaguar.socket.ts`.
+7. Connect Dolphin data socket with `src/socket/dolphin.socket.ts`.
+8. Store active token/socket references for outbound actions.
+9. Keep the account runner alive until OpenClaw aborts it, then stop refresh and disconnect sockets.
 
-OpenClaw calls standardized sections on this object:
+Jaguar delivers chat messages. Dolphin currently logs data events for tasks, projects, sprints, and releases.
 
-- `config` for account resolution and config rendering
-- `security` for DM policy decisions
-- `setup` + `setupWizard` for onboarding and configuration UX
-- `outbound` for sending messages to Omadeus
-- `gateway.startAccount` to start sockets and processing
-- `actions` for message-tool action discovery/handling
-- `status` for health snapshots and diagnostics
+## Inbound Message Flow
 
-### TL;DR
+Jaguar chat events enter through `src/channel.ts` and are normalized by `src/inbound.ts`.
 
-- `src/channel.ts` is the control center.
-- OpenClaw does not use Omadeus through one-off calls; it uses plugin hooks.
+`parseJaguarMessage(...)` keeps only non-removed chat messages with non-empty bodies. It detects mentions from `details.rawMessage` tokens such as `{user_reference_id:123}` and from leading bold mention text. Mention prefixes are stripped before the agent sees the content.
 
-## 3) Receive Flow (Omadeus -> OpenClaw Agent)
+`src/message-handler.ts` then processes the normalized message:
 
-High-level receive sequence:
+1. Drop empty messages.
+2. Enforce selected channel/member scope when configured.
+3. Require a mention for group/task messages unless selected-scope rules allow the message.
+4. Apply the OpenClaw control-command gate.
+5. Debounce regular inbound messages by room and sender.
+6. Handle Omadeus task/nugget create intents before dispatch when detected.
+7. Add nugget lookup context for references such as task/nugget numbers.
+8. Resolve the OpenClaw route (`sessionKey`, `agentId`, `accountId`).
+9. Build the agent envelope and context payload.
+10. Record inbound session metadata.
+11. Dispatch the turn through OpenClaw's reply pipeline.
 
-1. `gateway.startAccount` runs in `extensions/omadeus/src/channel.ts`.
-2. Auth starts through `extensions/omadeus/src/token.ts` (`createTokenManager`).
-3. Sockets connect:
-   - Jaguar chat socket: `extensions/omadeus/src/socket/jaguar.socket.ts`
-   - Dolphin data socket: `extensions/omadeus/src/socket/dolphin.socket.ts`
-4. Jaguar chat events are parsed by `extensions/omadeus/src/inbound.ts`:
-   - drops non-message payloads
-   - drops removed/self messages (depending on config)
-   - detects mention tokens
-   - strips mention prefix before agent processing
-5. Parsed inbound events are processed by `extensions/omadeus/src/message-handler.ts`:
-   - DM/group access checks + pairing behavior
-   - control-command gate checks
-   - route resolution (`sessionKey`, `agentId`)
-   - context/envelope construction
-   - dispatch into OpenClaw reply pipeline
+The context payload sets `MessageSid` to the Jaguar message id. That lets `edit`, `delete`, and `react` default to the current inbound message when the agent invokes a message action from the same turn.
 
-Important: Omadeus inbound messages are transformed into OpenClaw context payloads before the agent sees them.
+## Reply And Send Flow
 
-### TL;DR
+Agent replies use `src/reply-dispatcher.ts`.
 
-- Sockets receive raw events.
-- `inbound.ts` normalizes Omadeus data.
-- `message-handler.ts` does policy/routing/session wiring.
-- Final dispatch goes through OpenClaw's standard reply runtime.
+1. Resolve reply prefix context, text chunk limit, chunk mode, and human delay settings from OpenClaw runtime helpers.
+2. Create a reply dispatcher with typing behavior.
+3. For each reply payload, split text into chunks.
+4. Send each chunk with `sendOmadeusMessage(...)`.
 
-## 4) Send Flow (OpenClaw Agent -> Omadeus)
+`src/outbound.ts` sends through `sendRoomMessage(...)` in `src/api/message.api.ts`. Send destinations are Omadeus room ids, not message ids.
 
-High-level send sequence:
+Valid send targets are:
 
-1. Agent replies are handled by `extensions/omadeus/src/reply-dispatcher.ts`.
-2. Replies are chunked (configured text limits + mode).
-3. Each chunk calls `sendOmadeusMessage(...)`.
-4. `extensions/omadeus/src/outbound.ts` sends through Omadeus API (`sendRoomMessage`).
-5. Result metadata is returned to OpenClaw.
+- `room:123`
+- `123`
+- task-like targets such as `N123` or `T123` when `messaging.targetResolver` can resolve them to a task room
 
-`outbound.resolveTarget` in `extensions/omadeus/src/channel.ts` ensures a valid target exists (`<roomId>`).
+## Message Actions
 
-### TL;DR
+`actions.describeMessageTool` advertises `send`, `edit`, `delete`, and `react` when Omadeus is enabled and configured.
 
-- Reply dispatcher formats/chunks replies.
-- Outbound adapter sends each chunk via Omadeus API.
-- Target validation happens before sending.
+`actions.handleAction` currently implements:
 
-## 5) Setup And Onboarding Flow
+- `send` with create intent parameters to create Omadeus tasks/nuggets through `createNugget(...)`.
+- `edit` through `editMessage(...)`.
+- `delete` through `deleteMessage(...)`.
+- `react` through `addMessageReaction(...)`.
 
-Files:
+Action id rules:
 
-- `extensions/omadeus/src/setup-core.ts`
-  - low-level setup adapter (field parsing + config writes)
-- `extensions/omadeus/src/onboarding.ts`
-  - interactive wizard, auth checks, organization lookup, DM policy prompts
-- `extensions/omadeus/src/setup-surface.ts`
-  - setup surface export (`omadeusSetupWizard`)
+- `send` uses a room target (`to` / `target`) such as `room:123` or `123`.
+- `edit`, `delete`, and `react` use Jaguar message ids via `messageId`, `message_id`, or the current inbound `MessageSid`.
+- Reaction emoji must be allowed by `src/allowed-reaction-emojis.ts`; unsupported emoji return an ignored success result instead of calling Omadeus.
 
-The setup path can use env vars (`OMADEUS_EMAIL`, `OMADEUS_PASSWORD`, `OMADEUS_ORGANIZATION_ID`) or explicit prompt-driven credentials.
+## Setup Flow
 
-### TL;DR
+Setup is split across three files:
 
-- `setup-core.ts` = core config write behavior.
-- `onboarding.ts` = user-facing setup logic.
-- `setup-surface.ts` = exported setup surface used by OpenClaw.
+- `src/setup-core.ts` validates basic setup input and writes `channels.omadeus`.
+- `src/setup-surface.ts` exports `omadeusSetupWizard`.
+- `src/onboarding.ts` runs the interactive setup wizard, auth checks, organization/member lookup, and channel selection.
 
-## 6) Actions: Current State
+Supported setup environment variables:
 
-Actions are declared under `actions` in `extensions/omadeus/src/channel.ts`.
+- `OMADEUS_EMAIL`
+- `OMADEUS_PASSWORD`
+- `OMADEUS_ORGANIZATION_ID`
 
-Current behavior:
+Primary config fields live under `channels.omadeus`: `enabled`, `casUrl`, `maestroUrl`, `email`, `password`, `organizationId`, `sessionToken`, selected member id, and selected channel room/view fields.
 
-- `describeMessageTool` advertises `["send", "edit", "delete", "react"]` when Omadeus is enabled and configured.
-- `handleAction` implements **`react`** via `addMessageReaction` in `extensions/omadeus/src/api/message.api.ts` (Jaguar REST). Other actions fall through to defaults where applicable.
-- **Reactions** are limited to 👍 👎 ❤️ 😂 😮 😢 🙏 (see `extensions/omadeus/src/allowed-reaction-emojis.ts`). Any other emoji returns success with `ignored: true` and does **not** call the API.
-- Inbound messages set `MessageSid` on the agent context to the Jaguar **`messageId`**, so the shared message tool can default `react` to the current message without passing `messageId`.
-- Conversation routing uses `To` / `OriginatingTo` like `room:<roomId>`. The plugin **`messaging.targetResolver`** normalizes that to the numeric **room id** so core target resolution accepts it (reactions still use **`messageId`** via REST, not the room id in the API path).
+## Socket Contract
 
-### TL;DR
+`src/socket/socket.ts` owns shared WebSocket behavior for Jaguar and Dolphin.
 
-- **react**: `emoji` required (only the allowed set above); `messageId` optional if replying in the same conversation thread (uses inbound `MessageSid`).
-- **send / edit / delete**: discovery listed; plugin-specific handling can be extended in `handleAction` like `react`.
-
-## 7) How To Add More Actions Later
-
-Use this process when adding custom Omadeus actions:
-
-1. **Advertise the action**
-   - Update `actions.describeMessageTool` in `extensions/omadeus/src/channel.ts`.
-   - Add action name(s), and add `schema` if params are needed.
-
-2. **Implement handler logic**
-   - Branch by `ctx.action` in `actions.handleAction`.
-   - Validate params early.
-   - Call Omadeus API/socket helper(s) in `extensions/omadeus/src/api/*` or helper modules.
-   - Return structured result payloads (success and error).
-
-3. **Preserve fallback behavior**
-   - For unsupported actions, keep returning `null as never`.
-
-4. **Add tests**
-   - Add focused tests around discovery + handler behavior.
-   - Validate both success and parameter/error paths.
-
-5. **Keep boundaries clean**
-   - Prefer plugin-local imports and `runtime-api.ts` boundary exports for shared SDK types/helpers.
-
-### TL;DR
-
-- Add action in `describeMessageTool`.
-- Implement it in `handleAction`.
-- Keep fallback for unknown actions.
-- Add targeted tests.
-
-## Omadeus IDs (plain English)
-
-| What | Jaguar field | OpenClaw usage |
-|------|----------------|-----------------|
-| **Chat / DM / room** | `roomId` | **send** uses `to` / `target` as `room:<id>` or numeric id (where the message is posted). |
-| **One chat line** | `id` on the message object | **edit**, **delete**, **react** use **`messageId`** (also exposed as inbound **`MessageSid`** for the current message). |
-
-Sending never uses the message `id` as the destination; it uses **roomId**. Editing/deleting/reacting never use roomId as the primary key; they use **message id**.
-
-## One-Page TL;DR
-
-- OpenClaw loads Omadeus from `package.json` -> `index.ts` / `setup-entry.ts`.
-- `src/channel.ts` is the plugin contract OpenClaw executes.
-- Receive path: socket event -> normalize (`inbound.ts`) -> policy/routing (`message-handler.ts`) -> agent dispatch.
-- Send path: reply dispatcher (`reply-dispatcher.ts`) -> chunk -> API send (`outbound.ts`).
-- Setup path: `setup-core.ts` + `onboarding.ts` + `setup-surface.ts`.
-- Actions are discoverable today, but custom execution is still mostly TODO.
-- To add actions: update `describeMessageTool`, implement `handleAction`, add tests.
-
-## 8) Socket Heartbeat Contract
-
-Omadeus sockets use an app-level heartbeat in `extensions/omadeus/src/socket/socket.ts`.
-
-- **Sent by OpenClaw sockets**: `{"data":"keep-alive","action":"answer"}`
-- **Expected from backend**: `{"content":"keep-alive","action":"answer"}`
-
-Behavior:
-
-1. On socket open, send heartbeat immediately.
-2. Send heartbeat every `HEARTBEAT_INTERVAL_MS` (default 30s).
-3. Reset missed-heartbeat counter when backend answer arrives.
-4. If missed count reaches `HEARTBEAT_MISSED_MAX` (default 5), close socket to force reconnect.
-
-Tuning constants:
-
-- `HEARTBEAT_INTERVAL_MS` (default `30_000`)
-- `HEARTBEAT_MISSED_MAX` (default `5`)
-
-### TL;DR
-
-- Immediate heartbeat on connect + periodic heartbeats.
-- Counter resets only when backend sends keep-alive answer.
-- Too many misses triggers reconnect automatically.
+- WebSocket URL is built from `maestroUrl`, socket path suffix, and the current token.
+- If the token needs refresh before connecting, the socket refreshes first and retries connect.
+- Reconnect backoff starts at `2_000ms` and caps at `60_000ms`.
+- On open, the socket sends `{"data":"keep-alive","action":"answer"}` immediately and then every `30_000ms`.
+- Keep-alive answers reset the missed-heartbeat counter.
+- Backend heartbeat pings are answered immediately.
+- After 5 unanswered heartbeat sends, the socket closes so reconnect logic can establish a fresh connection.
