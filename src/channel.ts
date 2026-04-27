@@ -1,21 +1,44 @@
 import {
+  createTopLevelChannelConfigAdapter,
+} from "openclaw/plugin-sdk/channel-config-helpers";
+import {
+  type ChannelStatusIssue,
+} from "openclaw/plugin-sdk/channel-runtime";
+import { createAttachedChannelResultAdapter } from "openclaw/plugin-sdk/channel-send-result";
+import { buildComputedAccountStatusSnapshot } from "openclaw/plugin-sdk/status-helpers";
+import {
+  buildPassiveChannelStatusSummary,
+  buildTrafficStatusSummary,
+} from "openclaw/plugin-sdk/extension-shared";
+import {
   DEFAULT_ACCOUNT_ID,
   missingTargetError,
   type ChannelPlugin,
-  type ChannelStatusIssue,
   type OpenClawConfig,
-} from "openclaw/plugin-sdk";
+} from "../runtime-api.js";
+import {
+  ALLOWED_OMADEUS_REACTION_EMOJI_LIST,
+  isAllowedOmadeusReactionEmoji,
+} from "./allowed-reaction-emojis.js";
+import {
+  createNugget,
+  resolveTaskRoomIdByNumber,
+  type OmadeusNuggetKind,
+  type OmadeusNuggetPriority,
+} from "./api/nugget.api.js";
+import { addMessageReaction, deleteMessage, editMessage } from "./api/message.api.js";
 import {
   listOmadeusAccountIds,
   resolveDefaultOmadeusAccountId,
-  resolveIgnoreSelfMessages,
   resolveOmadeusAccount,
 } from "./config.js";
 import { parseJaguarMessage } from "./inbound.js";
 import { createOmadeusMessageHandler } from "./message-handler.js";
-import { omadeusOnboardingAdapter } from "./onboarding.js";
+import { parseTaskChannelTargetIntent } from "./nugget-lookup.js";
 import { sendOmadeusMessage, type OutboundDeps } from "./outbound.js";
 import { getOmadeusRuntime } from "./runtime.js";
+import { omadeusSetupAdapter } from "./setup-core.js";
+import { omadeusSetupWizard } from "./setup-surface.js";
 import { createDolphinSocketClient, type DolphinSocketClient } from "./socket/dolphin.socket.js";
 import { createJaguarSocketClient, type JaguarSocketClient } from "./socket/jaguar.socket.js";
 import { createTokenManager, type OmadeusTokenManager } from "./token.js";
@@ -47,6 +70,119 @@ async function persistSessionToken(token: string): Promise<void> {
   } as OpenClawConfig);
 }
 
+const omadeusConfigAdapter = createTopLevelChannelConfigAdapter<Account>({
+  sectionKey: "omadeus",
+  resolveAccount: (cfg) => resolveOmadeusAccount({ cfg }),
+  listAccountIds: listOmadeusAccountIds,
+  defaultAccountId: resolveDefaultOmadeusAccountId,
+  deleteMode: "clear-fields",
+  clearBaseFields: [
+    "casUrl",
+    "maestroUrl",
+    "email",
+    "password",
+    "organizationId",
+    "sessionToken",
+    "selectedMemberReferenceId",
+    "selectedChannelViewId",
+    "selectedChannelTitle",
+    "selectedChannelPrivateRoomId",
+    "selectedChannelPublicRoomId",
+  ],
+  // Keep adapter contract satisfied even though Omadeus no longer uses DM allowlists.
+  resolveAllowFrom: () => [],
+  formatAllowFrom: () => [],
+});
+
+const defaultRuntimeState = {
+  accountId: DEFAULT_ACCOUNT_ID,
+  running: false,
+  connected: false,
+  lastConnectedAt: null,
+  lastStartAt: null,
+  lastStopAt: null,
+  lastInboundAt: null,
+  lastOutboundAt: null,
+  lastError: null,
+} as const;
+
+/** Normalize Jaguar chat target: `room:123` or `123` -> `123` (numeric room id for APIs). */
+function normalizeOmadeusRoomId(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const prefixed = /^room:(\d+)$/i.exec(trimmed);
+  if (prefixed) {
+    return prefixed[1];
+  }
+  return /^\d+$/.test(trimmed) ? trimmed : undefined;
+}
+
+function readReactionMessageId(
+  params: Record<string, unknown>,
+  toolContext?: { currentMessageId?: string | number },
+): number | undefined {
+  const raw = params.messageId ?? params.message_id ?? toolContext?.currentMessageId;
+  if (raw == null) {
+    return undefined;
+  }
+  const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function readStringParam(params: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function readNumberParam(params: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+      return Number(value.trim());
+    }
+  }
+  return undefined;
+}
+
+function readNuggetKind(params: Record<string, unknown>): OmadeusNuggetKind {
+  const raw = readStringParam(params, ["kind", "entity", "type"])?.toLowerCase();
+  return raw === "nugget" ? "nugget" : "task";
+}
+
+function readNuggetPriority(params: Record<string, unknown>): OmadeusNuggetPriority {
+  const raw = readStringParam(params, ["priority"])?.toLowerCase();
+  if (raw === "urgent" || raw === "high" || raw === "medium" || raw === "low") {
+    return raw;
+  }
+  return "low";
+}
+
+function isCreateNuggetRequest(params: Record<string, unknown>): boolean {
+  const op = readStringParam(params, ["op", "operation", "intent"])?.toLowerCase();
+  if (op === "create_nugget" || op === "create_task") {
+    return true;
+  }
+  const create =
+    params["createNugget"] === true ||
+    params["createTask"] === true ||
+    params["create"] === true ||
+    readStringParam(params, ["actionType", "mode"])?.toLowerCase() === "create";
+  if (create) {
+    return true;
+  }
+  return Boolean(readStringParam(params, ["title"]) && readStringParam(params, ["description"]));
+}
+
 export const omadeusPlugin: ChannelPlugin<Account> = {
   id: "omadeus",
   meta: {
@@ -59,7 +195,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
   },
   capabilities: {
     chatTypes: ["direct", "group"],
-    reactions: false,
+    reactions: true,
     threads: false,
     media: false,
     nativeCommands: false,
@@ -67,29 +203,298 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
   },
   agentPrompt: {
     messageToolHints: () => [
-      "- Omadeus: reply with plain text. Only use the message tool for proactive sends to other channels/rooms.",
+      "- Omadeus routing: **send** uses **room id** (`to` / `target`, e.g. `room:117947` or `117947`). **edit**, **delete**, **react** use the Jaguar **message** `id` (`messageId`, or the current inbound message from context).",
+      "- Create Omadeus task/nugget: use `action=send` with params `{ op: \"create_task\"|\"create_nugget\", title, description, priority?, stage?, kind?, memberReferenceId?, clientId?, folderId? }`.",
+      `- Reactions only allow these emojis (others are ignored): ${ALLOWED_OMADEUS_REACTION_EMOJI_LIST.join(" ")}`,
+      "- Reply in chat with plain text; use the message tool for proactive sends, edits, deletes, or reactions.",
     ],
   },
   actions: {
-    listActions: () => ["send", "edit", "delete"],
+    describeMessageTool: ({ cfg }) => {
+      const enabled =
+        cfg.channels?.omadeus?.enabled !== false &&
+        resolveOmadeusAccount({ cfg }).credentialSource !== "none";
+      return {
+        actions: enabled ? ["send", "edit", "delete", "react"] : [],
+        capabilities: [],
+        schema: null,
+      };
+    },
     handleAction: async (ctx) => {
-      ctx.log?.info(`[omadeus] handleAction - context: ${JSON.stringify(ctx)}`);
-      ctx.log?.info(`[omadeus] handleAction - action: ${ctx.action}`);
+      const apiOptsForAccount = () => {
+        const account = resolveOmadeusAccount({ cfg: ctx.cfg });
+        if (!activeTokenManager) {
+          throw new Error("Omadeus: not connected; gateway must be running with Omadeus enabled.");
+        }
+        return { maestroUrl: account.maestroUrl, tokenManager: activeTokenManager };
+      };
 
+      if (ctx.action === "send" && isCreateNuggetRequest(ctx.params)) {
+        const title = readStringParam(ctx.params, ["title", "subject", "name"]);
+        const description = readStringParam(ctx.params, ["description", "details", "body"]);
+        if (!title || !description) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus create task/nugget requires `title` and `description`.",
+              },
+            ],
+            details: { error: "Missing title/description." },
+          };
+        }
+
+        const kind = readNuggetKind(ctx.params);
+        const priority = readNuggetPriority(ctx.params);
+        const stage = readStringParam(ctx.params, ["stage"]) ?? "Triage";
+        const memberReferenceId =
+          readNumberParam(ctx.params, ["memberReferenceId", "assigneeReferenceId"]) ??
+          activeTokenManager?.getPayload().referenceId;
+        const clientId = readNumberParam(ctx.params, ["clientId"]) ?? 1;
+        const folderId = readNumberParam(ctx.params, ["folderId"]) ?? 1;
+
+        if (!memberReferenceId) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus create task/nugget needs `memberReferenceId` or an active authenticated user.",
+              },
+            ],
+            details: { error: "Missing memberReferenceId." },
+          };
+        }
+
+        try {
+          const created = await createNugget(apiOptsForAccount(), {
+            title,
+            description,
+            stage,
+            kind,
+            priority,
+            memberReferenceId,
+            clientId,
+            folderId,
+          });
+          const number = created["number"];
+          const id = created["id"];
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  ok: true,
+                  channel: "omadeus",
+                  action: "create",
+                  kind,
+                  number,
+                  id,
+                  title,
+                }),
+              },
+            ],
+            details: {
+              ok: true,
+              channel: "omadeus",
+              action: "create",
+              kind,
+              number,
+              id,
+            },
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: msg }],
+            details: { error: msg },
+          };
+        }
+      }
+
+      if (ctx.action === "edit") {
+        const messageId = readReactionMessageId(ctx.params, ctx.toolContext);
+        const body =
+          (typeof ctx.params.message === "string" && ctx.params.message.trim()) ||
+          (typeof ctx.params.text === "string" && ctx.params.text.trim()) ||
+          (typeof ctx.params.content === "string" && ctx.params.content.trim()) ||
+          "";
+        if (messageId == null) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus edit requires `messageId` (Jaguar message id) or current inbound MessageSid.",
+              },
+            ],
+            details: { error: "Missing messageId for edit." },
+          };
+        }
+        if (!body) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus edit requires new text in `message`, `text`, or `content`.",
+              },
+            ],
+            details: { error: "Missing body for edit." },
+          };
+        }
+        try {
+          await editMessage(apiOptsForAccount(), { messageId, body });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: msg }],
+            details: { error: msg },
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ ok: true, channel: "omadeus", action: "edit", messageId }),
+            },
+          ],
+          details: { ok: true, channel: "omadeus", messageId },
+        };
+      }
+
+      if (ctx.action === "delete") {
+        const messageId = readReactionMessageId(ctx.params, ctx.toolContext);
+        if (messageId == null) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus delete requires `messageId` (Jaguar message id) or current inbound MessageSid.",
+              },
+            ],
+            details: { error: "Missing messageId for delete." },
+          };
+        }
+        try {
+          await deleteMessage(apiOptsForAccount(), { messageId });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: msg }],
+            details: { error: msg },
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ ok: true, channel: "omadeus", action: "delete", messageId }),
+            },
+          ],
+          details: { ok: true, channel: "omadeus", messageId },
+        };
+      }
+
+      if (ctx.action === "react") {
+        const emoji = typeof ctx.params.emoji === "string" ? ctx.params.emoji.trim() : "";
+        if (!emoji) {
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: "Omadeus react requires `emoji`." }],
+            details: { error: "Omadeus react requires emoji." },
+          };
+        }
+        if (!isAllowedOmadeusReactionEmoji(emoji)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  ok: true,
+                  channel: "omadeus",
+                  ignored: true,
+                  reason: "unsupported_emoji",
+                  emoji,
+                  allowed: [...ALLOWED_OMADEUS_REACTION_EMOJI_LIST],
+                }),
+              },
+            ],
+            details: {
+              ok: true,
+              ignored: true,
+              channel: "omadeus",
+            },
+          };
+        }
+        const messageId = readReactionMessageId(ctx.params, ctx.toolContext);
+        if (messageId == null) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus react requires `messageId` or a current inbound message id (MessageSid).",
+              },
+            ],
+            details: { error: "Missing messageId for reaction." },
+          };
+        }
+        if (!activeTokenManager) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Omadeus is not connected; cannot react (gateway must be running).",
+              },
+            ],
+            details: { error: "Omadeus not connected." },
+          };
+        }
+        try {
+          await addMessageReaction(apiOptsForAccount(), { messageId, emoji });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: msg }],
+            details: { error: msg },
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                ok: true,
+                channel: "omadeus",
+                messageId,
+                emoji,
+              }),
+            },
+          ],
+          details: { ok: true, channel: "omadeus", messageId, emoji },
+        };
+      }
       // Return null to fall through to default handler
       return null as never;
     },
   },
   reload: { configPrefixes: ["channels.omadeus"] },
-  onboarding: omadeusOnboardingAdapter,
+  setup: omadeusSetupAdapter,
+  setupWizard: omadeusSetupWizard,
 
   // -------------------------------------------------------------------------
   // Config adapter
   // -------------------------------------------------------------------------
   config: {
-    listAccountIds: (cfg) => listOmadeusAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveOmadeusAccount({ cfg, accountId }),
-    defaultAccountId: (_cfg) => resolveDefaultOmadeusAccountId(_cfg),
+    ...omadeusConfigAdapter,
     isConfigured: (account) => account.credentialSource !== "none",
     unconfiguredReason: () =>
       "Omadeus requires email, password, and organizationId. Run: openclaw setup omadeus",
@@ -101,59 +506,47 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
       credentialSource: account.credentialSource,
       baseUrl: account.maestroUrl,
     }),
-    resolveAllowFrom: ({ cfg, accountId }) => {
-      const account = resolveOmadeusAccount({ cfg, accountId });
-      return (account.config.dm?.allowFrom ?? []).map(String);
-    },
-    formatAllowFrom: ({ allowFrom }) => allowFrom.map((e) => String(e).trim()).filter(Boolean),
   },
 
-  // -------------------------------------------------------------------------
-  // Security
-  // -------------------------------------------------------------------------
-  security: {
-    resolveDmPolicy: ({ account }) => ({
-      policy: account.config.dm?.policy ?? "open",
-      allowFrom: account.config.dm?.allowFrom ?? [],
-      allowFromPath: "channels.omadeus.dm.",
-      approveHint: "openclaw config set channels.omadeus.dm.allowFrom '[\"*\"]'",
-    }),
-  },
-
-  // -------------------------------------------------------------------------
-  // Setup adapter
-  // -------------------------------------------------------------------------
-  setup: {
-    validateInput: ({ input }) => {
-      if (!input.email && !input.useEnv) {
-        return "Omadeus requires --email (or use OMADEUS_EMAIL env var).";
-      }
-      return null;
-    },
-    applyAccountConfig: ({ cfg, accountId: _accountId, input }) => {
-      const casUrl = input.httpUrl?.trim() || undefined;
-      const maestroUrl = input.url?.trim() || undefined;
-      const email = input.email?.trim() || undefined;
-      const password = input.password?.trim() || undefined;
-      const organizationId = input.organizationId
-        ? Number(String(input.organizationId).trim())
-        : undefined;
-
-      return {
-        ...cfg,
-        channels: {
-          ...cfg.channels,
-          omadeus: {
-            ...(cfg.channels as Record<string, unknown>)?.["omadeus"],
-            enabled: true,
-            ...(casUrl ? { casUrl } : {}),
-            ...(maestroUrl ? { maestroUrl } : {}),
-            ...(email ? { email } : {}),
-            ...(password ? { password } : {}),
-            ...(organizationId ? { organizationId } : {}),
-          },
-        },
-      } as OpenClawConfig;
+  // Used by shared message-tool target resolution (send, react, etc.).
+  messaging: {
+    targetResolver: {
+      hint: "Use room:<roomId> (matches OpenClaw OriginatingTo) or a numeric Jaguar room id.",
+      looksLikeId: (raw) => {
+        const t = raw.trim();
+        return /^room:\d+$/i.test(t) || /^\d+$/.test(t) || /^[nt]\d+$/i.test(t);
+      },
+      resolveTarget: async ({ cfg, input }) => {
+        const id = normalizeOmadeusRoomId(input);
+        if (!id) {
+          const taskIntent = parseTaskChannelTargetIntent(input);
+          if (!taskIntent || !activeTokenManager) {
+            return null;
+          }
+          const roomId = await resolveTaskRoomIdByNumber(
+            {
+              maestroUrl: resolveOmadeusAccount({ cfg }).maestroUrl,
+              tokenManager: activeTokenManager,
+            },
+            { nuggetNumber: taskIntent.nuggetNumber },
+          );
+          if (!roomId) {
+            return null;
+          }
+          return {
+            to: String(roomId),
+            kind: "group",
+            display: `${taskIntent.rawPrefix.toUpperCase()}${taskIntent.nuggetNumber}`,
+            source: "normalized",
+          };
+        }
+        return {
+          to: id,
+          kind: "group",
+          display: `room:${id}`,
+          source: "normalized",
+        };
+      },
     },
   },
 
@@ -165,27 +558,38 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     textChunkLimit: 4000,
     chunker: (text, limit) => getOmadeusRuntime().channel.text.chunkMarkdownText(text, limit),
     chunkerMode: "markdown",
+    ...createAttachedChannelResultAdapter({
+      channel: "omadeus",
+      sendText: async ({ cfg, to, text }) => {
+        if (!activeJaguar || !activeTokenManager) {
+          throw new Error("Omadeus: not connected. Is the gateway running with Omadeus enabled?");
+        }
+        const deps: OutboundDeps = {
+          apiOpts: {
+            maestroUrl: resolveOmadeusAccount({
+              cfg,
+            }).maestroUrl,
+            tokenManager: activeTokenManager,
+          },
+          jaguarSocket: activeJaguar,
+        };
+        return await sendOmadeusMessage(deps, { to, text });
+      },
+    }),
     resolveTarget: ({ to }) => {
       const trimmed = to?.trim() ?? "";
-      if (!trimmed) {
-        return { ok: false, error: missingTargetError("Omadeus", "<roomId>") };
+      const id = normalizeOmadeusRoomId(trimmed);
+      if (!id) {
+        if (/^[nt]\d+$/i.test(trimmed)) {
+          // Allow task-id-like target to proceed; async target resolver may dock it to a room later.
+          return { ok: true, to: trimmed };
+        }
+        return {
+          ok: false,
+          error: missingTargetError("Omadeus", "room:<roomId> or numeric room id"),
+        };
       }
-      return { ok: true, to: trimmed };
-    },
-    sendText: async ({ to, text }) => {
-      if (!activeJaguar || !activeTokenManager) {
-        throw new Error("Omadeus: not connected. Is the gateway running with Omadeus enabled?");
-      }
-      const deps: OutboundDeps = {
-        apiOpts: {
-          maestroUrl: resolveOmadeusAccount({
-            cfg: getOmadeusRuntime().loadConfig(),
-          }).maestroUrl,
-          tokenManager: activeTokenManager,
-        },
-        jaguarSocket: activeJaguar,
-      };
-      return sendOmadeusMessage(deps, { to, text });
+      return { ok: true, to: id };
     },
   },
 
@@ -193,13 +597,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
   // Status adapter
   // -------------------------------------------------------------------------
   status: {
-    defaultRuntime: {
-      accountId: DEFAULT_ACCOUNT_ID,
-      running: false,
-      lastStartAt: null,
-      lastStopAt: null,
-      lastError: null,
-    },
+    defaultRuntime: defaultRuntimeState,
     collectStatusIssues: (accounts): ChannelStatusIssue[] =>
       accounts.flatMap((entry) => {
         const issues: ChannelStatusIssue[] = [];
@@ -215,27 +613,26 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         return issues;
       }),
     buildChannelSummary: ({ snapshot }) => ({
-      configured: snapshot.configured ?? false,
-      credentialSource: snapshot.credentialSource ?? "none",
-      baseUrl: snapshot.baseUrl ?? null,
-      running: snapshot.running ?? false,
-      lastStartAt: snapshot.lastStartAt ?? null,
-      lastStopAt: snapshot.lastStopAt ?? null,
-      lastError: snapshot.lastError ?? null,
+      ...buildPassiveChannelStatusSummary(snapshot, {
+        credentialSource: snapshot.credentialSource ?? "none",
+        baseUrl: snapshot.baseUrl ?? null,
+        connected: snapshot.connected ?? false,
+        lastConnectedAt: snapshot.lastConnectedAt ?? null,
+      }),
+      ...buildTrafficStatusSummary(snapshot),
     }),
     buildAccountSnapshot: ({ account, runtime }) => ({
-      accountId: account.accountId,
-      name: account.name,
-      enabled: account.enabled,
-      configured: account.credentialSource !== "none",
-      credentialSource: account.credentialSource,
+      ...buildComputedAccountStatusSnapshot({
+        accountId: account.accountId,
+        name: account.name,
+        enabled: account.enabled,
+        configured: account.credentialSource !== "none",
+        runtime,
+      }),
       baseUrl: account.maestroUrl,
-      running: runtime?.running ?? false,
-      lastStartAt: runtime?.lastStartAt ?? null,
-      lastStopAt: runtime?.lastStopAt ?? null,
-      lastError: runtime?.lastError ?? null,
-      lastInboundAt: runtime?.lastInboundAt ?? null,
-      lastOutboundAt: runtime?.lastOutboundAt ?? null,
+      credentialSource: account.credentialSource,
+      connected: runtime?.connected ?? false,
+      lastConnectedAt: runtime?.lastConnectedAt ?? null,
     }),
   },
 
@@ -303,7 +700,6 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
       activeTokenManager = tokenManager;
 
       const selfReferenceId = tokenManager.getPayload().referenceId;
-      const ignoreSelfMessages = resolveIgnoreSelfMessages(cfg);
 
       const outboundDeps: OutboundDeps = {
         apiOpts: { maestroUrl: account.maestroUrl, tokenManager },
@@ -329,7 +725,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
               : `${msg.subscribableKind}/${msg.roomName ?? msg.roomId} from ${msg.senderReferenceId}`;
           log.info(`[jaguar] ${label}: ${msg.body.slice(0, 80)}`);
 
-          const inbound = parseJaguarMessage(msg, { selfReferenceId, ignoreSelfMessages }, log);
+          const inbound = parseJaguarMessage(msg, { selfReferenceId }, log);
           if (inbound) {
             log.info(
               `[jaguar] inbound: ${inbound.subscribableKind} room=${inbound.roomId} ` +

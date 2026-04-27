@@ -3,7 +3,7 @@ import {
   type OpenClawConfig,
   type ReplyPayload,
   type RuntimeEnv,
-} from "openclaw/plugin-sdk";
+} from "../runtime-api.js";
 import { sendOmadeusMessage, type OutboundDeps } from "./outbound.js";
 import { getOmadeusRuntime } from "./runtime.js";
 

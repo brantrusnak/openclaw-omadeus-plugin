@@ -1,17 +1,22 @@
 import {
   DEFAULT_ACCOUNT_ID,
-  createScopedPairingAccess,
   logInboundDrop,
-  readStoreAllowFromForDmPolicy,
   resolveControlCommandGate,
-  resolveDmGroupAccessWithLists,
   type OpenClawConfig,
   type RuntimeEnv,
-} from "openclaw/plugin-sdk";
+} from "../runtime-api.js";
+import { createNugget, resolveTaskChannelRoomId, searchNuggetByNumber } from "./api/nugget.api.js";
+import {
+  appendNuggetLookupContextForAgent,
+  parseChannelTaskCreateIntent,
+  parseNuggetLookupIntent,
+  parseRecurringScheduleIntent,
+} from "./nugget-lookup.js";
 import type { OutboundDeps } from "./outbound.js";
 import { createOmadeusReplyDispatcher } from "./reply-dispatcher.js";
+import { getOmadeusChannelConfig } from "./config.js";
 import { getOmadeusRuntime } from "./runtime.js";
-import type { OmadeusChannelConfig, OmadeusInboundMessage } from "./types.js";
+import type { OmadeusInboundMessage } from "./types.js";
 
 type Log = {
   info: (msg: string, extra?: Record<string, unknown>) => void;
@@ -30,15 +35,7 @@ export type OmadeusMessageHandlerDeps = {
 export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
   const { cfg, runtime, log, outboundDeps } = deps;
   const core = getOmadeusRuntime();
-  const omadeusCfg = (cfg.channels as Record<string, unknown> | undefined)?.["omadeus"] as
-    | OmadeusChannelConfig
-    | undefined;
-
-  const pairing = createScopedPairingAccess({
-    core,
-    channel: "omadeus",
-    accountId: DEFAULT_ACCOUNT_ID,
-  });
+  const omadeusCfg = getOmadeusChannelConfig(cfg);
 
   const inboundDebounceMs = core.channel.debounce.resolveInboundDebounceMs({
     cfg,
@@ -57,65 +54,59 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
       return;
     }
 
-    const dmPolicy = omadeusCfg?.dm?.policy ?? "open";
-    const configuredDmAllowFrom = (omadeusCfg?.dm?.allowFrom ?? []).map(String);
-    const storedAllowFrom = await readStoreAllowFromForDmPolicy({
-      provider: "omadeus",
-      accountId: pairing.accountId,
-      dmPolicy,
-      readStore: pairing.readStoreForDmPolicy,
-    });
-    const useAccessGroups =
-      (cfg.commands as Record<string, unknown> | undefined)?.useAccessGroups !== false;
-
-    if (isDirectMessage) {
-      const access = resolveDmGroupAccessWithLists({
-        isGroup: false,
-        dmPolicy,
-        groupPolicy: "disabled",
-        allowFrom: configuredDmAllowFrom,
-        storeAllowFrom: storedAllowFrom,
-        groupAllowFromFallbackToAllowFrom: false,
-        isSenderAllowed: (allowFrom) =>
-          allowFrom.some((a) => a === "*" || a === senderId || a === senderName),
-      });
-
-      if (access.decision !== "allow") {
-        if (access.reason === "dmPolicy=disabled") {
-          log.debug?.("dropping dm (dms disabled)");
-          return;
-        }
-        if (access.decision === "pairing") {
-          const request = await pairing.upsertPairingRequest({
-            id: senderId,
-            meta: { name: senderName },
-          });
-          if (request) {
-            log.info("pairing request created", { sender: senderId, label: senderName });
-          }
-        }
-        log.debug?.("dropping dm (not allowlisted)", { sender: senderId, label: senderName });
+    const selectedPublicRoomId = omadeusCfg?.selectedChannelPublicRoomId;
+    const selectedPrivateRoomId = omadeusCfg?.selectedChannelPrivateRoomId;
+    const selectedMemberReferenceId = omadeusCfg?.selectedMemberReferenceId;
+    const hasSelectedScope =
+      typeof selectedPublicRoomId === "number" || typeof selectedPrivateRoomId === "number";
+    let inSelectedChannelRoom = false;
+    let isSelectedMemberTaskPrivate = false;
+    if (hasSelectedScope) {
+      inSelectedChannelRoom =
+        inbound.roomId === selectedPublicRoomId || inbound.roomId === selectedPrivateRoomId;
+      const isSelectedMember =
+        typeof selectedMemberReferenceId !== "number" ||
+        inbound.fromReferenceId === selectedMemberReferenceId;
+      isSelectedMemberTaskPrivate =
+        inbound.subscribableKind === "task" && inbound.isMention && isSelectedMember;
+      const allowSelectedChannelMessage = inSelectedChannelRoom && isSelectedMember;
+      if (!allowSelectedChannelMessage && !isSelectedMemberTaskPrivate) {
+        log.info("omadeus: dropped message outside selected channel scope", {
+          roomId: inbound.roomId,
+          roomName: inbound.roomName,
+          selectedPublicRoomId,
+          selectedPrivateRoomId,
+          selectedMemberReferenceId,
+          kind: inbound.subscribableKind,
+          fromReferenceId: inbound.fromReferenceId,
+          isMention: inbound.isMention,
+          selectedMemberMatched: isSelectedMember,
+        });
         return;
       }
     }
 
+    const useAccessGroups =
+      (cfg.commands as Record<string, unknown> | undefined)?.useAccessGroups !== false;
+
     // For group messages, only respond when mentioned (unless groupPolicy is open)
-    if (!isDirectMessage && !inbound.isMention) {
+    const bypassMentionGate = hasSelectedScope && (inSelectedChannelRoom || isSelectedMemberTaskPrivate);
+    if (!isDirectMessage && !inbound.isMention && !bypassMentionGate) {
       log.debug?.("skipping group message (not mentioned)");
       return;
+    }
+    if (!isDirectMessage && !inbound.isMention && bypassMentionGate) {
+      log.info("omadeus: processing selected-scope group message without mention", {
+        roomId: inbound.roomId,
+        roomName: inbound.roomName,
+        kind: inbound.subscribableKind,
+      });
     }
 
     const hasControlCommand = core.channel.text.hasControlCommand(rawBody, cfg);
     const commandGate = resolveControlCommandGate({
       useAccessGroups,
-      authorizers: [
-        {
-          configured: configuredDmAllowFrom.length > 0,
-          allowed: configuredDmAllowFrom.some(
-            (a) => a === "*" || a === senderId || a === senderName,
-          ),
-        },
-      ],
+      authorizers: [],
       allowTextCommands: true,
       hasControlCommand,
     });
@@ -128,6 +119,83 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
         target: senderId,
       });
       return;
+    }
+
+    let bodyForAgent = rawBody;
+    const createIntent = parseChannelTaskCreateIntent(rawBody);
+    if (createIntent) {
+      try {
+        const memberReferenceId =
+          typeof selectedMemberReferenceId === "number"
+            ? selectedMemberReferenceId
+            : inbound.fromReferenceId;
+        const created = await createNugget(outboundDeps.apiOpts, {
+          title: createIntent.title,
+          description: createIntent.description,
+          kind: createIntent.kind,
+          priority: createIntent.priority,
+          stage: "Triage",
+          memberReferenceId,
+          clientId: 1,
+          folderId: 1,
+        });
+        const createdLabel =
+          typeof created["number"] === "number"
+            ? `N${created["number"]}`
+            : String(created["id"] ?? "created");
+        const recurring = parseRecurringScheduleIntent(rawBody);
+        if (recurring && typeof created["number"] === "number") {
+          const cronExpr = recurring.everyMinutes === 60 ? "0 * * * *" : `*/${recurring.everyMinutes} * * * *`;
+          const taskRoomId = resolveTaskChannelRoomId(created);
+          const taskTarget = taskRoomId ? `room:${taskRoomId}` : `N${created["number"]}`;
+          bodyForAgent =
+            `${rawBody}\n\n` +
+            `[Omadeus create] Created ${createIntent.kind} ${createdLabel}.\n` +
+            `[Scheduling required] The user asked for recurring execution.\n` +
+            `You MUST use the cron tool now (no simulation) to add a job with:\n` +
+            `- schedule.kind: "cron"\n` +
+            `- schedule.expr: "${cronExpr}"\n` +
+            `- payload.kind: "agentTurn"\n` +
+            `- payload.message: "${createIntent.description}"\n` +
+            `- payload.deliver: true\n` +
+            `- payload.channel: "omadeus"\n` +
+            `- payload.to: "${taskTarget}"\n` +
+            `- sessionTarget: "isolated"\n` +
+            `- delivery.mode: "announce"\n` +
+            `- delivery.channel: "omadeus"\n` +
+            `- delivery.to: "${taskTarget}"\n` +
+            `Do NOT deliver to the current selected channel; delivery must go only to the created task private channel target above.\n` +
+            `Then confirm cron job creation to the user.`;
+        } else {
+          bodyForAgent = `${rawBody}\n\n[Omadeus create] Created ${createIntent.kind} ${createdLabel}.`;
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        runtime.error?.(`omadeus channel-triggered task create failed: ${errorMessage}`);
+      }
+    }
+
+    const nuggetIntent = parseNuggetLookupIntent(rawBody);
+    if (nuggetIntent) {
+      try {
+        const nugget = await searchNuggetByNumber(outboundDeps.apiOpts, {
+          nuggetNumber: nuggetIntent.nuggetNumber,
+        });
+        bodyForAgent = appendNuggetLookupContextForAgent(
+          rawBody,
+          nuggetIntent.nuggetNumber,
+          nugget,
+        );
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        runtime.error?.(`omadeus nugget lookup failed: ${errorMessage}`);
+        bodyForAgent = appendNuggetLookupContextForAgent(
+          rawBody,
+          nuggetIntent.nuggetNumber,
+          null,
+          errorMessage,
+        );
+      }
     }
 
     const omadeusFrom = isDirectMessage ? `omadeus:${senderId}` : `omadeus:group:${roomId}`;
@@ -175,10 +243,12 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
 
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
-      BodyForAgent: rawBody,
+      BodyForAgent: bodyForAgent,
       RawBody: rawBody,
       CommandBody: rawBody.trim(),
       BodyForCommands: rawBody.trim(),
+      /** Lets the message tool default `react` / `edit` to this Jaguar message id. */
+      MessageSid: String(inbound.messageId),
       From: omadeusFrom,
       To: omadeusTo,
       SessionKey: route.sessionKey,

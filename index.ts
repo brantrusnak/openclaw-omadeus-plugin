@@ -1,17 +1,14 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { defineChannelPluginEntry } from "openclaw/plugin-sdk/core";
 import { omadeusPlugin } from "./src/channel.js";
 import { setOmadeusRuntime } from "./src/runtime.js";
 
-const plugin = {
+export { omadeusPlugin } from "./src/channel.js";
+export { setOmadeusRuntime } from "./src/runtime.js";
+
+export default defineChannelPluginEntry({
   id: "omadeus",
   name: "Omadeus",
   description: "Omadeus project management channel plugin",
-  configSchema: emptyPluginConfigSchema(),
-  register(api: OpenClawPluginApi) {
-    setOmadeusRuntime(api.runtime);
-    api.registerChannel({ plugin: omadeusPlugin });
-  },
-};
-
-export default plugin;
+  plugin: omadeusPlugin,
+  setRuntime: setOmadeusRuntime,
+});

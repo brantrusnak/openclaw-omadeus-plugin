@@ -25,6 +25,17 @@ export type OmadeusSocketClient = {
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
+// Heartbeat tuning knobs for Omadeus sockets.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_MISSED_MAX = 5;
+const KEEP_ALIVE_CONTENT = "keep-alive";
+const KEEP_ALIVE_ACTION = "answer";
+
+function isKeepAliveMessage(data: Record<string, unknown>): boolean {
+  const content = (data as { content?: unknown }).content;
+  const payloadData = (data as { data?: unknown }).data;
+  return content === KEEP_ALIVE_CONTENT || payloadData === KEEP_ALIVE_CONTENT;
+}
 
 export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSocketClient {
   const {
@@ -42,6 +53,8 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
   let ws: WebSocket | null = null;
   let reconnectAttempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let heartbeatMissCount = 0;
   let intentionalClose = false;
 
   function buildWsUrl(): string {
@@ -58,6 +71,39 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
     reconnectTimer = setTimeout(() => connect(), delayMs);
   }
 
+  function stopHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  function resetHeartbeat() {
+    heartbeatMissCount = 0;
+  }
+
+  function sendKeepAlive() {
+    if (ws?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    heartbeatMissCount += 1;
+    ws.send(JSON.stringify({ data: KEEP_ALIVE_CONTENT, action: KEEP_ALIVE_ACTION }));
+
+    if (heartbeatMissCount >= HEARTBEAT_MISSED_MAX) {
+      log?.warn(
+        `${logPrefix} heartbeat unanswered ${heartbeatMissCount} times; reconnecting socket`,
+      );
+      ws.close();
+    }
+  }
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      sendKeepAlive();
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
   function connect() {
     if (ws) {
       ws.removeAllListeners();
@@ -65,6 +111,8 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
       ws = null;
     }
     intentionalClose = false;
+    stopHeartbeat();
+    resetHeartbeat();
 
     if (tokenManager.needsRefresh()) {
       tokenManager
@@ -86,17 +134,25 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
       reconnectAttempt = 0;
       log?.info(`${logPrefix} connected`);
       onConnect?.();
+      resetHeartbeat();
+      sendKeepAlive();
+      startHeartbeat();
     });
 
     ws.on("message", (raw) => {
       try {
         const data = JSON.parse(String(raw)) as Record<string, unknown>;
 
-        const content = (data as { content?: unknown }).content;
         const action = (data as { action?: unknown }).action;
-        if (content === "keep-alive" && action === "answer") {
+        if (isKeepAliveMessage(data) && action === KEEP_ALIVE_ACTION) {
+          resetHeartbeat();
+          return;
+        }
+
+        // If backend sends heartbeat pings, answer them immediately.
+        if (isKeepAliveMessage(data) && action === "heartbeat") {
           if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ data: "keep-alive", action: "answer" }));
+            ws.send(JSON.stringify({ data: KEEP_ALIVE_CONTENT, action: KEEP_ALIVE_ACTION }));
           }
           return;
         }
@@ -112,6 +168,8 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
       log?.info(`${logPrefix} disconnected: ${msg}`);
       onDisconnect?.(msg);
       ws = null;
+      stopHeartbeat();
+      resetHeartbeat();
       scheduleReconnect();
     });
 
@@ -127,6 +185,8 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    stopHeartbeat();
+    resetHeartbeat();
     if (ws) {
       ws.removeAllListeners();
       ws.close();

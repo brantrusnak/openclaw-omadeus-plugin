@@ -1,14 +1,7 @@
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import type { PluginRuntime } from "../runtime-api.js";
 
-let runtime: PluginRuntime | null = null;
+const { setRuntime: setOmadeusRuntime, getRuntime: getOmadeusRuntime } =
+  createPluginRuntimeStore<PluginRuntime>("Omadeus runtime not initialized");
 
-export function setOmadeusRuntime(next: PluginRuntime) {
-  runtime = next;
-}
-
-export function getOmadeusRuntime(): PluginRuntime {
-  if (!runtime) {
-    throw new Error("Omadeus runtime not initialized");
-  }
-  return runtime;
-}
+export { getOmadeusRuntime, setOmadeusRuntime };

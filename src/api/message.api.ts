@@ -1,6 +1,22 @@
 import type { OmadeusMessage } from "../types.js";
 import { jaguarFetch, generateTemporaryId, type OmadeusApiOptions } from "../utils/http.util.js";
 
+async function readJsonOrEmpty(res: Response): Promise<unknown> {
+  if (res.status === 204) {
+    return undefined;
+  }
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
 export async function sendRoomMessage(
   opts: OmadeusApiOptions,
   params: { roomId: number | string; body: string },
@@ -192,7 +208,8 @@ export async function addMessageReaction(
     const text = await res.text().catch(() => "");
     throw new Error(`Omadeus add reaction failed (${res.status}): ${text.slice(0, 200)}`);
   }
-  return (await res.json()) as unknown;
+  // Success is often 204 No Content with no body.
+  return readJsonOrEmpty(res);
 }
 
 export async function listMessageReactions(
@@ -220,5 +237,5 @@ export async function removeMessageReactions(
     const text = await res.text().catch(() => "");
     throw new Error(`Omadeus remove reactions failed (${res.status}): ${text.slice(0, 200)}`);
   }
-  return (await res.json()) as unknown;
+  return readJsonOrEmpty(res);
 }

@@ -11,12 +11,13 @@ export type OmadeusChannelConfig = {
   organizationId?: number;
   /** Cached Omadeus session JWT obtained during onboarding/startup. */
   sessionToken?: string;
-  /** When true, messages sent by the authenticated user are ignored. Default: true. */
-  ignoreSelfMessages?: boolean;
-  dm?: {
-    policy?: string;
-    allowFrom?: Array<string | number>;
-  };
+  /** Selected member reference ID (account) used by onboarding. */
+  selectedMemberReferenceId?: number;
+  /** Selected channel metadata used for inbound filtering. */
+  selectedChannelViewId?: number;
+  selectedChannelTitle?: string;
+  selectedChannelPrivateRoomId?: number;
+  selectedChannelPublicRoomId?: number;
 };
 
 export type ResolvedOmadeusAccount = {
@@ -30,8 +31,8 @@ export type ResolvedOmadeusAccount = {
   password: string;
   organizationId: number;
   sessionToken?: string;
-  /** "none" if neither config credentials nor cached session token exist */
-  credentialSource: "config" | "session" | "none";
+  /** "none" if neither config/env credentials nor cached session token exist */
+  credentialSource: "config" | "env" | "session" | "none";
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,26 @@ export type OmadeusOrganization = {
   plan: string;
   membersCount: number;
   createdAt: string;
+};
+
+export type OmadeusOrganizationMember = {
+  referenceId: number;
+  id: number;
+  firstName?: string;
+  lastName?: string;
+  title?: string;
+  email?: string;
+  isSystem?: boolean;
+};
+
+export type OmadeusChannelView = {
+  id: number;
+  title: string;
+  type?: string;
+  privateRoomId?: number | null;
+  publicRoomId?: number | null;
+  privateRoomTitle?: string | null;
+  publicRoomTitle?: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +172,8 @@ export type DolphinSocketEvent = Record<string, unknown>;
 // ---------------------------------------------------------------------------
 
 export type OmadeusInboundMessage = {
+  /** Jaguar message id (used for reactions, replies, etc.). */
+  messageId: number;
   from: string;
   fromReferenceId: number;
   content: string;

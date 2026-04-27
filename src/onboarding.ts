@@ -1,20 +1,18 @@
-import type {
-  ChannelOnboardingAdapter,
-  ChannelOnboardingDmPolicy,
-  DmPolicy,
-  OpenClawConfig,
-  WizardPrompter,
-} from "openclaw/plugin-sdk";
+import type { ChannelSetupWizard, OpenClawConfig, WizardPrompter } from "openclaw/plugin-sdk/setup";
+import { DEFAULT_ACCOUNT_ID, formatDocsLink } from "openclaw/plugin-sdk/setup";
 import {
-  addWildcardAllowFrom,
-  DEFAULT_ACCOUNT_ID,
-  formatDocsLink,
-  mergeAllowFromEntries,
-} from "openclaw/plugin-sdk";
-import { listOrganizations } from "./api/auth.api.js";
+  listMemberChannelViews,
+  listOrganizationMembers,
+  listOrganizations,
+} from "./api/auth.api.js";
 import { authenticate } from "./auth.js";
-import { resolveOmadeusAccount } from "./config.js";
-import type { OmadeusChannelConfig } from "./types.js";
+import { getOmadeusChannelConfig, resolveOmadeusAccount } from "./config.js";
+import { OMADEUS_CAS_URL, OMADEUS_MAESTRO_URL } from "./defaults.js";
+import type {
+  OmadeusChannelConfig,
+  OmadeusChannelView,
+  OmadeusOrganizationMember,
+} from "./types.js";
 
 const channel = "omadeus" as const;
 
@@ -23,66 +21,7 @@ type CoreConfig = OpenClawConfig & {
 };
 
 function getOmadeusSection(cfg: OpenClawConfig): OmadeusChannelConfig | undefined {
-  return (cfg as CoreConfig).channels?.omadeus;
-}
-
-function setOmadeusDmPolicy(cfg: OpenClawConfig, policy: DmPolicy): OpenClawConfig {
-  const allowFrom =
-    policy === "open" ? addWildcardAllowFrom(getOmadeusSection(cfg)?.dm?.allowFrom) : undefined;
-  return {
-    ...cfg,
-    channels: {
-      ...cfg.channels,
-      omadeus: {
-        ...getOmadeusSection(cfg),
-        dm: {
-          ...getOmadeusSection(cfg)?.dm,
-          policy,
-          ...(allowFrom ? { allowFrom } : {}),
-        },
-      },
-    },
-  };
-}
-
-async function promptOmadeusAllowFrom(params: {
-  cfg: OpenClawConfig;
-  prompter: WizardPrompter;
-}): Promise<OpenClawConfig> {
-  const { cfg, prompter } = params;
-  const existing = getOmadeusSection(cfg)?.dm?.allowFrom ?? [];
-
-  while (true) {
-    const entry = await prompter.text({
-      message: "Omadeus allowFrom (user IDs or reference IDs, comma-separated)",
-      placeholder: "123, 456",
-      initialValue: existing[0] ? String(existing[0]) : undefined,
-      validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
-    });
-    const parts = String(entry)
-      .split(/[\n,;]+/g)
-      .map((e) => e.trim())
-      .filter(Boolean);
-    if (parts.length === 0) {
-      await prompter.note("Enter at least one user.", "Omadeus allowlist");
-      continue;
-    }
-    const unique = mergeAllowFromEntries(existing.map(String), parts);
-    return {
-      ...cfg,
-      channels: {
-        ...cfg.channels,
-        omadeus: {
-          ...getOmadeusSection(cfg),
-          dm: {
-            ...getOmadeusSection(cfg)?.dm,
-            policy: "allowlist",
-            allowFrom: unique,
-          },
-        },
-      },
-    };
-  }
+  return getOmadeusChannelConfig(cfg as CoreConfig);
 }
 
 async function noteOmadeusAuthHelp(prompter: WizardPrompter): Promise<void> {
@@ -90,12 +29,11 @@ async function noteOmadeusAuthHelp(prompter: WizardPrompter): Promise<void> {
     [
       "Omadeus authenticates via CAS + Maestro (email + password + organization).",
       "You need:",
-      "  - CAS URL (authentication server)",
-      "  - Maestro URL (API server)",
       "  - Email + password",
       "  - Organization ID (we can look it up for you)",
-      "Env vars supported: OMADEUS_EMAIL, OMADEUS_PASSWORD, OMADEUS_ORGANIZATION_ID,",
-      "  OMADEUS_CAS_URL, OMADEUS_MAESTRO_URL.",
+      `CAS URL: ${OMADEUS_CAS_URL}`,
+      `Maestro URL: ${OMADEUS_MAESTRO_URL}`,
+      "Env vars supported: OMADEUS_EMAIL, OMADEUS_PASSWORD, OMADEUS_ORGANIZATION_ID.",
       `Docs: ${formatDocsLink("/channels/omadeus", "omadeus")}`,
     ].join("\n"),
     "Omadeus setup",
@@ -154,33 +92,198 @@ async function promptOrganizationId(params: {
   return Number(String(raw).trim());
 }
 
-const dmPolicy: ChannelOnboardingDmPolicy = {
-  label: "Omadeus",
-  channel,
-  policyKey: "channels.omadeus.dm.policy",
-  allowFromKey: "channels.omadeus.dm.allowFrom",
-  getCurrent: (cfg) => (getOmadeusSection(cfg)?.dm?.policy as DmPolicy) ?? "open",
-  setPolicy: (cfg, policy) => setOmadeusDmPolicy(cfg, policy),
-  promptAllowFrom: promptOmadeusAllowFrom,
-};
+async function promptChannelSelection(params: {
+  prompter: WizardPrompter;
+  maestroUrl: string;
+  sessionToken: string;
+  memberReferenceId: number;
+  existing?: OmadeusChannelConfig;
+}): Promise<{
+  selectedChannelViewId: number;
+  selectedChannelTitle: string;
+  selectedChannelPrivateRoomId?: number;
+  selectedChannelPublicRoomId?: number;
+}> {
+  const { prompter, maestroUrl, sessionToken, memberReferenceId, existing } = params;
+  const channels = await listMemberChannelViews({
+    maestroUrl,
+    sessionToken,
+    memberReferenceId,
+    skip: 0,
+    take: 100,
+  });
+  if (channels.length === 0) {
+    throw new Error("No channels found for this account.");
+  }
+  const selected = await prompter.select({
+    message: "Which channel to use?",
+    options: channels.map((item) => ({
+      value: String(item.id),
+      label: item.title || `Channel ${item.id}`,
+    })),
+    initialValue:
+      existing?.selectedChannelViewId !== undefined
+        ? String(existing.selectedChannelViewId)
+        : String(channels[0]!.id),
+  });
+  const chosen = channels.find((item) => String(item.id) === String(selected));
+  if (!chosen) {
+    throw new Error("Selected channel was not found.");
+  }
+  return {
+    selectedChannelViewId: chosen.id,
+    selectedChannelTitle: chosen.title,
+    ...(typeof chosen.privateRoomId === "number"
+      ? { selectedChannelPrivateRoomId: chosen.privateRoomId }
+      : {}),
+    ...(typeof chosen.publicRoomId === "number"
+      ? { selectedChannelPublicRoomId: chosen.publicRoomId }
+      : {}),
+  };
+}
 
-export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
-  channel,
-  getStatus: async ({ cfg }) => {
-    const account = resolveOmadeusAccount({ cfg });
-    const configured = account.credentialSource !== "none";
+function memberLabel(member: OmadeusOrganizationMember): string {
+  const fullName = `${member.firstName ?? ""} ${member.lastName ?? ""}`.trim();
+  if (member.title?.trim()) {
+    return member.title.trim();
+  }
+  if (fullName) {
+    return fullName;
+  }
+  if (member.email?.trim()) {
+    return member.email.trim();
+  }
+  return `Member ${member.referenceId}`;
+}
+
+function memberHint(member: OmadeusOrganizationMember): string | undefined {
+  const fullName = `${member.firstName ?? ""} ${member.lastName ?? ""}`.trim();
+  const parts = [fullName, member.email?.trim(), `ref:${member.referenceId}`].filter(Boolean);
+  return parts.length > 0 ? parts.join(" | ") : undefined;
+}
+
+function filterMembersByQuery(
+  members: OmadeusOrganizationMember[],
+  query: string,
+): OmadeusOrganizationMember[] {
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    return members;
+  }
+  return members.filter((member) => {
+    const fields = [
+      String(member.referenceId),
+      member.title ?? "",
+      member.firstName ?? "",
+      member.lastName ?? "",
+      member.email ?? "",
+    ].map((value) => value.toLowerCase());
+    return fields.some((value) => value.includes(q));
+  });
+}
+
+async function promptMemberSelection(params: {
+  prompter: WizardPrompter;
+  maestroUrl: string;
+  sessionToken: string;
+  organizationId: number;
+  existingMemberReferenceId?: number;
+  fallbackMemberReferenceId?: number;
+}): Promise<{ memberReferenceId: number; memberTitle: string }> {
+  const {
+    prompter,
+    maestroUrl,
+    sessionToken,
+    organizationId,
+    existingMemberReferenceId,
+    fallbackMemberReferenceId,
+  } = params;
+
+  const members = (
+    await listOrganizationMembers({
+      maestroUrl,
+      sessionToken,
+      organizationId,
+    })
+  )
+    .filter((member) => member.isSystem !== true)
+    .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)));
+
+  if (members.length === 0) {
+    throw new Error("No organization members found.");
+  }
+
+  while (true) {
+    const query = String(
+      await prompter.text({
+        message: "Search member to listen to (name/title/email/referenceId, optional)",
+        placeholder: "e.g. John Doe",
+      }),
+    );
+    const filtered = filterMembersByQuery(members, query).slice(0, 100);
+    if (filtered.length === 0) {
+      await prompter.note("No members matched that search. Try another query.", "Omadeus member");
+      continue;
+    }
+
+    const defaultRef = existingMemberReferenceId ?? fallbackMemberReferenceId;
+    const selected = await prompter.select({
+      message: "Which member should OpenClaw listen to?",
+      options: filtered.map((member) => ({
+        value: String(member.referenceId),
+        label: memberLabel(member),
+        hint: memberHint(member),
+      })),
+      initialValue:
+        defaultRef !== undefined && filtered.some((member) => member.referenceId === defaultRef)
+          ? String(defaultRef)
+          : String(filtered[0]!.referenceId),
+    });
+    const chosen = filtered.find((member) => String(member.referenceId) === String(selected));
+    if (!chosen) {
+      await prompter.note("Could not resolve selected member. Please retry.", "Omadeus member");
+      continue;
+    }
     return {
-      channel,
-      configured,
-      statusLines: [
-        `Omadeus: ${configured ? "configured" : "needs email, password, and organization ID"}`,
-      ],
-      selectionHint: configured ? "configured" : "needs credentials",
-      quickstartScore: configured ? 2 : 0,
+      memberReferenceId: chosen.referenceId,
+      memberTitle: memberLabel(chosen),
     };
-  },
+  }
+}
 
-  configure: async ({ cfg, prompter, forceAllowFrom }) => {
+export const omadeusSetupWizard: ChannelSetupWizard = {
+  channel,
+  resolveAccountIdForConfigure: () => DEFAULT_ACCOUNT_ID,
+  resolveShouldPromptAccountIds: () => false,
+  status: {
+    configuredLabel: "configured",
+    unconfiguredLabel: "needs credentials",
+    configuredHint: "configured",
+    unconfiguredHint: "needs credentials",
+    configuredScore: 2,
+    unconfiguredScore: 0,
+    resolveConfigured: ({ cfg }) => {
+      const account = resolveOmadeusAccount({ cfg });
+      return account.credentialSource !== "none";
+    },
+    resolveStatusLines: ({ cfg }) => {
+      const account = resolveOmadeusAccount({ cfg });
+      const configured = account.credentialSource !== "none";
+      return [
+        `Omadeus: ${configured ? "configured" : "needs email, password, and organization ID"}`,
+      ];
+    },
+    resolveSelectionHint: ({ cfg }) => {
+      const account = resolveOmadeusAccount({ cfg });
+      return account.credentialSource !== "none" ? "configured" : "needs credentials";
+    },
+    resolveQuickstartScore: ({ cfg }) => {
+      const account = resolveOmadeusAccount({ cfg });
+      return account.credentialSource !== "none" ? 2 : 0;
+    },
+  },
+  credentials: [],
+  finalize: async ({ cfg, prompter }) => {
     const account = resolveOmadeusAccount({ cfg });
     const section = getOmadeusSection(cfg) ?? {};
     let next = cfg;
@@ -191,115 +294,37 @@ export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
 
     const envEmail = process.env.OMADEUS_EMAIL?.trim();
     const envPassword = process.env.OMADEUS_PASSWORD?.trim();
-    const envOrgId = process.env.OMADEUS_ORGANIZATION_ID?.trim();
-    const envCasUrl = process.env.OMADEUS_CAS_URL?.trim();
-    const envMaestroUrl = process.env.OMADEUS_MAESTRO_URL?.trim();
-    const hasConfigCreds = Boolean(
-      section.email?.trim() && section.password?.trim() && section.organizationId,
-    );
-    const canUseEnv = Boolean(!hasConfigCreds && envEmail && envPassword && envOrgId);
 
-    let casUrl: string | undefined;
-    let maestroUrl: string | undefined;
-    let email: string | undefined;
-    let password: string | undefined;
-    let organizationId: number | undefined;
+    const casUrl = OMADEUS_CAS_URL;
+    const maestroUrl = OMADEUS_MAESTRO_URL;
 
-    if (canUseEnv) {
-      const useEnv = await prompter.confirm({
-        message:
-          "OMADEUS_EMAIL + OMADEUS_PASSWORD + OMADEUS_ORGANIZATION_ID detected. Use env vars?",
-        initialValue: true,
-      });
-      if (useEnv) {
-        next = {
-          ...next,
-          channels: {
-            ...next.channels,
-            omadeus: {
-              ...getOmadeusSection(next),
-              enabled: true,
-              ...(envCasUrl ? { casUrl: envCasUrl } : {}),
-              ...(envMaestroUrl ? { maestroUrl: envMaestroUrl } : {}),
-            },
-          },
-        };
-        if (forceAllowFrom) {
-          next = await promptOmadeusAllowFrom({ cfg: next, prompter });
-        }
-        return { cfg: next, accountId: DEFAULT_ACCOUNT_ID };
-      }
-    } else if (hasConfigCreds) {
-      const keep = await prompter.confirm({
-        message: "Omadeus credentials already configured. Keep them?",
-        initialValue: true,
-      });
-      if (keep) {
-        next = {
-          ...next,
-          channels: {
-            ...next.channels,
-            omadeus: { ...getOmadeusSection(next), enabled: true },
-          },
-        };
-        if (forceAllowFrom) {
-          next = await promptOmadeusAllowFrom({ cfg: next, prompter });
-        }
-        return { cfg: next, accountId: DEFAULT_ACCOUNT_ID };
-      }
-    }
-
-    casUrl = String(
+    let email = String(
       await prompter.text({
-        message: "CAS URL (authentication server)",
-        initialValue: section.casUrl ?? envCasUrl,
-        validate: (value) => {
-          const raw = String(value ?? "").trim();
-          if (!raw) return "Required";
-          if (!/^https?:\/\//i.test(raw)) return "Use a full URL (https://...)";
-          return undefined;
-        },
-      }),
-    ).trim();
-
-    maestroUrl = String(
-      await prompter.text({
-        message: "Maestro URL (API server)",
-        initialValue: section.maestroUrl ?? envMaestroUrl,
-        validate: (value) => {
-          const raw = String(value ?? "").trim();
-          if (!raw) return "Required";
-          if (!/^https?:\/\//i.test(raw)) return "Use a full URL (https://...)";
-          return undefined;
-        },
-      }),
-    ).trim();
-
-    email = String(
-      await prompter.text({
-        message: "Omadeus email",
+        message: "Omadeus username (email)",
         initialValue: section.email ?? envEmail,
         validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
       }),
     ).trim();
 
-    password = String(
+    let password = String(
       await prompter.text({
         message: "Omadeus password",
         initialValue: section.password ?? envPassword,
+        sensitive: true,
         validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
       }),
     ).trim();
 
-    organizationId = await promptOrganizationId({
+    const organizationId = await promptOrganizationId({
       prompter,
-      maestroUrl: maestroUrl ?? section.maestroUrl ?? "",
+      maestroUrl,
       email,
       existing: section.organizationId,
     });
 
     // Verify the full auth flow before saving
     let sessionToken: string | undefined;
+    let selfReferenceId: number | undefined;
     while (true) {
       try {
         const { dolphinToken, payload } = await authenticate({
@@ -310,6 +335,7 @@ export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
           organizationId,
         });
         sessionToken = dolphinToken;
+        selfReferenceId = payload.referenceId;
         await prompter.note(`Authenticated as ${payload.email}`, "Omadeus authentication");
         break;
       } catch (err) {
@@ -337,16 +363,38 @@ export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
           await prompter.text({
             message: "Omadeus password",
             initialValue: password,
+            sensitive: true,
             validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
           }),
         ).trim();
       }
     }
 
-    const ignoreSelfMessages = await prompter.confirm({
-      message: "Ignore messages sent by the authenticated user?",
-      initialValue: section.ignoreSelfMessages !== false,
+    if (!sessionToken) {
+      throw new Error("Authentication is required to list channels.");
+    }
+
+    const selectedMember = await promptMemberSelection({
+      prompter,
+      maestroUrl,
+      sessionToken,
+      organizationId,
+      existingMemberReferenceId: section.selectedMemberReferenceId,
+      fallbackMemberReferenceId: selfReferenceId,
     });
+
+    const selectedChannel = await promptChannelSelection({
+      prompter,
+      maestroUrl,
+      sessionToken,
+      memberReferenceId: selectedMember.memberReferenceId,
+      existing: section,
+    });
+
+    await prompter.note(
+      `Omadeus will process only "${selectedChannel.selectedChannelTitle}" for member ${selectedMember.memberTitle} (${selectedMember.memberReferenceId}), plus task private-chat mentions.`,
+      "Omadeus channel scope",
+    );
 
     next = {
       ...next,
@@ -361,20 +409,21 @@ export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
           password,
           organizationId,
           ...(sessionToken ? { sessionToken } : {}),
-          ignoreSelfMessages,
+          selectedMemberReferenceId: selectedMember.memberReferenceId,
+          selectedChannelViewId: selectedChannel.selectedChannelViewId,
+          selectedChannelTitle: selectedChannel.selectedChannelTitle,
+          ...(selectedChannel.selectedChannelPrivateRoomId !== undefined
+            ? { selectedChannelPrivateRoomId: selectedChannel.selectedChannelPrivateRoomId }
+            : {}),
+          ...(selectedChannel.selectedChannelPublicRoomId !== undefined
+            ? { selectedChannelPublicRoomId: selectedChannel.selectedChannelPublicRoomId }
+            : {}),
         },
       },
     };
 
-    if (forceAllowFrom) {
-      next = await promptOmadeusAllowFrom({ cfg: next, prompter });
-    }
-
     return { cfg: next, accountId: DEFAULT_ACCOUNT_ID };
   },
-
-  dmPolicy,
-
   disable: (cfg) => ({
     ...cfg,
     channels: {
@@ -383,3 +432,5 @@ export const omadeusOnboardingAdapter: ChannelOnboardingAdapter = {
     },
   }),
 };
+
+export const omadeusOnboardingAdapter = omadeusSetupWizard;

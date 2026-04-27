@@ -9,7 +9,7 @@ export async function authenticate(params: {
   email: string;
   password: string;
   organizationId: number;
-}): Promise<{ token: string; payload: OmadeusJwtPayload }> {
+}): Promise<{ dolphinToken: string; payload: OmadeusJwtPayload }> {
   const { casUrl, maestroUrl, email, password, organizationId } = params;
   const { token } = await createCasToken({ casUrl, email, password });
 

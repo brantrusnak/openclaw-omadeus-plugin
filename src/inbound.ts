@@ -11,6 +11,7 @@ type Log = {
 };
 
 const USER_REF_PATTERN = /\{user_reference_id:(\d+)\}/g;
+const BOLD_MENTION_PREFIX_PATTERN = /^\*\*@[^*]+\*\*/;
 
 /**
  * Parse the `details` JSON string to extract the rawMessage with mention
@@ -39,6 +40,14 @@ function isBotMentioned(details: OmadeusMessageDetails | null, selfReferenceId: 
 }
 
 /**
+ * Fallback mention detection when details.rawMessage is absent.
+ * Omadeus often prefixes mentioned messages with `**@Display Name** ...`.
+ */
+function hasMentionPrefixInBody(body: string): boolean {
+  return BOLD_MENTION_PREFIX_PATTERN.test(body.trim());
+}
+
+/**
  * Strip the formatted @mention from the body so the agent sees clean text.
  * The body contains `**@Display Name** actual text`; this strips the bold
  * mention prefix when it appears at the start.
@@ -61,14 +70,12 @@ export function isOmadeusMessage(data: unknown): data is OmadeusMessage {
  *
  * Returns null when:
  * - The event is not a chat message
- * - The message was sent by the bot itself (when ignoreSelfMessages is true)
  * - The body is empty or the message was removed
  */
 export function parseJaguarMessage(
   msg: OmadeusMessage,
   opts: {
     selfReferenceId: number;
-    ignoreSelfMessages: boolean;
   },
   log?: Log,
 ): OmadeusInboundMessage | null {
@@ -79,21 +86,17 @@ export function parseJaguarMessage(
 
   if (msg.removedAt) return null;
 
-  if (opts.ignoreSelfMessages && msg.senderReferenceId === opts.selfReferenceId) {
-    log?.debug?.("[jaguar-inbound] ignoring own message");
-    return null;
-  }
-
   const body = (msg.body ?? "").trim();
   if (!body) return null;
 
   const details = parseDetails(msg.details);
-  const mentioned = isBotMentioned(details, opts.selfReferenceId);
+  const mentioned = isBotMentioned(details, opts.selfReferenceId) || hasMentionPrefixInBody(body);
   const content = mentioned ? stripLeadingMention(body) : body;
 
   if (!content) return null;
 
   return {
+    messageId: msg.id,
     from: String(msg.senderReferenceId),
     fromReferenceId: msg.senderReferenceId,
     content,

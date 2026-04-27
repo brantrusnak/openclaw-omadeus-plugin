@@ -5,13 +5,23 @@
   "description": "OpenClaw Omadeus project management channel plugin",
   "type": "module",
   "dependencies": {},
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "workspace:*"
+  },
   "peerDependencies": {
-    "openclaw": ">=2026.2.25"
+    "openclaw": ">=2026.4.10"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [
       "./index.ts"
     ],
+    "setupEntry": "./setup-entry.ts",
     "channel": {
       "id": "omadeus",
       "label": "Omadeus",
