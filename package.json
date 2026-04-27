@@ -1,5 +1,5 @@
 {
-  "name": "@openclaw/omadeus",
+  "name": "@brantrusnak/openclaw-omadeus",
   "version": "2026.2.25",
   "private": false,
   "description": "OpenClaw Omadeus project management channel plugin",
@@ -14,13 +14,22 @@
   "license": "ISC",
   "author": "Brant Rusnak",
   "type": "module",
-  "main": "index.js",
+  "main": "./index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepack": "node ./scripts/verify-npm-files.mjs"
   },
+  "files": [
+    "index.ts",
+    "setup-entry.ts",
+    "api.ts",
+    "runtime-api.ts",
+    "openclaw.plugin.json",
+    "src",
+    "!**/*.test.ts"
+  ],
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*",
-    "openclaw": "workspace:*"
+    "openclaw": ">=2026.4.10"
   },
   "peerDependencies": {
     "openclaw": ">=2026.4.10"
@@ -29,6 +38,9 @@
     "openclaw": {
       "optional": true
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "openclaw": {
     "extensions": [
@@ -45,7 +57,7 @@
       "order": 70
     },
     "install": {
-      "localPath": "extensions/omadeus",
+      "localPath": ".",
       "defaultChoice": "local"
     }
   }
