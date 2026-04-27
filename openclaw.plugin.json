@@ -18,5 +18,74 @@
       "selectedChannelPrivateRoomId": { "type": "number" },
       "selectedChannelPublicRoomId": { "type": "number" }
     }
+  },
+  "channelConfigs": {
+    "omadeus": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "casUrl": { "type": "string" },
+          "maestroUrl": { "type": "string" },
+          "email": { "type": "string" },
+          "password": { "type": "string" },
+          "organizationId": { "type": "number" },
+          "sessionToken": { "type": "string" },
+          "selectedMemberReferenceId": { "type": "number" },
+          "selectedChannelViewId": { "type": "number" },
+          "selectedChannelTitle": { "type": "string" },
+          "selectedChannelPrivateRoomId": { "type": "number" },
+          "selectedChannelPublicRoomId": { "type": "number" }
+        }
+      },
+      "uiHints": {
+        "casUrl": {
+          "label": "CAS URL",
+          "placeholder": "https://dev1-cas.rouztech.com"
+        },
+        "maestroUrl": {
+          "label": "Maestro URL",
+          "placeholder": "https://dev3-maestro.rouztech.com"
+        },
+        "email": {
+          "label": "Email"
+        },
+        "password": {
+          "label": "Password",
+          "sensitive": true
+        },
+        "organizationId": {
+          "label": "Organization ID"
+        },
+        "sessionToken": {
+          "label": "Session token",
+          "sensitive": true,
+          "advanced": true
+        },
+        "selectedMemberReferenceId": {
+          "label": "Selected member reference ID",
+          "advanced": true
+        },
+        "selectedChannelViewId": {
+          "label": "Selected channel view ID",
+          "advanced": true
+        },
+        "selectedChannelTitle": {
+          "label": "Selected channel title",
+          "advanced": true
+        },
+        "selectedChannelPrivateRoomId": {
+          "label": "Selected private room ID",
+          "advanced": true
+        },
+        "selectedChannelPublicRoomId": {
+          "label": "Selected public room ID",
+          "advanced": true
+        }
+      },
+      "label": "Omadeus",
+      "description": "Omadeus project management channel configuration"
+    }
   }
 }
