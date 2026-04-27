@@ -221,7 +221,9 @@ async function loadSelectableMembers(params: {
   maestroUrl: string;
   sessionToken: string;
   organizationId: number;
+  excludeReferenceIds?: number[];
 }): Promise<OmadeusOrganizationMember[]> {
+  const excluded = new Set(params.excludeReferenceIds ?? []);
   return (
     await listOrganizationMembers({
       maestroUrl: params.maestroUrl,
@@ -229,7 +231,7 @@ async function loadSelectableMembers(params: {
       organizationId: params.organizationId,
     })
   )
-    .filter((member) => member.isSystem !== true)
+    .filter((member) => member.isSystem !== true && !excluded.has(member.referenceId))
     .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)));
 }
 
@@ -410,6 +412,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       maestroUrl,
       sessionToken,
       organizationId,
+      excludeReferenceIds: [selfReferenceId],
     });
     const existingInbound = section.inbound;
 
