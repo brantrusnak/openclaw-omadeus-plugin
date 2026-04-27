@@ -1,5 +1,5 @@
 import type { ChannelSetupWizard, OpenClawConfig, WizardPrompter } from "openclaw/plugin-sdk/setup";
-import { DEFAULT_ACCOUNT_ID, formatDocsLink } from "openclaw/plugin-sdk/setup";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/setup";
 import {
   listOrganizationMembers,
   listOrganizations,
@@ -67,7 +67,6 @@ async function noteOmadeusAuthHelp(prompter: WizardPrompter): Promise<void> {
       `CAS URL: ${OMADEUS_CAS_URL}`,
       `Maestro URL: ${OMADEUS_MAESTRO_URL}`,
       "Env vars supported: OMADEUS_EMAIL, OMADEUS_PASSWORD, OMADEUS_ORGANIZATION_ID.",
-      `Docs: ${formatDocsLink("/channels/omadeus", "omadeus")}`,
     ].join("\n"),
     "Omadeus setup",
   );

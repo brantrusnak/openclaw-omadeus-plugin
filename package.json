@@ -54,10 +54,8 @@
     "channel": {
       "id": "omadeus",
       "label": "Omadeus",
-      "selectionLabel": "Omadeus (WebSocket)",
-      "docsPath": "/channels/omadeus",
-      "docsLabel": "omadeus",
-      "blurb": "Omadeus project management — tasks, chat rooms, and sprints.",
+      "selectionLabel": "Omadeus (API + WebSocket)",
+      "blurb": "AI-native project management that knows your role, speaks your language, and keeps your team in sync. No noise.",
       "order": 70
     },
     "install": {

@@ -184,10 +184,10 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
   meta: {
     id: "omadeus",
     label: "Omadeus",
-    selectionLabel: "Omadeus (WebSocket)",
-    docsPath: "/channels/omadeus",
-    docsLabel: "omadeus",
-    blurb: "Omadeus project management — tasks, chat rooms, and sprints.",
+    selectionLabel: "Omadeus (API + WebSocket)",
+    docsPath: "",
+    docsLabel: "",
+    blurb: "AI-native project management that knows your role, speaks your language, and keeps your team in sync. No noise.",
   },
   capabilities: {
     chatTypes: ["direct", "group"],
