@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { findNuggetRowByNumber, readNuggetNumber, resolveTaskChannelRoomId } from "./nugget.api.js";
+import {
+  findNuggetRowByNumber,
+  findNuggetRowByRoomId,
+  readNuggetNumber,
+  resolveTaskChannelRoomId,
+} from "./nugget.api.js";
 
 describe("readNuggetNumber", () => {
   it("reads only the display number field", () => {
@@ -20,6 +25,20 @@ describe("findNuggetRowByNumber", () => {
     ] as Record<string, unknown>[];
     expect(findNuggetRowByNumber(rows, 12255)).toEqual(rows[1]);
     expect(findNuggetRowByNumber(rows, 12256)).toBeUndefined();
+  });
+});
+
+describe("findNuggetRowByRoomId", () => {
+  it("matches private, public, or shared room id", () => {
+    const rows = [
+      { number: 1, privateRoomId: 999 },
+      { number: 2, publicRoomId: 118_031 },
+      { number: 3, sharedRoomId: 5 },
+    ] as Record<string, unknown>[];
+    expect(findNuggetRowByRoomId(rows, 118_031)).toEqual(rows[1]);
+    expect(findNuggetRowByRoomId(rows, 5)).toEqual(rows[2]);
+    expect(findNuggetRowByRoomId(rows, 999)).toEqual(rows[0]);
+    expect(findNuggetRowByRoomId(rows, 0)).toBeUndefined();
   });
 });
 

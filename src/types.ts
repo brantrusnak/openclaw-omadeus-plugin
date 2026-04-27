@@ -29,6 +29,20 @@ export type OmadeusInboundEntityKind =
   | "client"
   | "folder";
 
+/** Jaguar entity chats (`subscribableKind`) — DMs and channel rooms use other values. */
+export const OMADEUS_INBOUND_ENTITY_KINDS: readonly OmadeusInboundEntityKind[] = [
+  "task",
+  "nugget",
+  "project",
+  "release",
+  "sprint",
+  "summary",
+  "client",
+  "folder",
+];
+
+export const OMADEUS_INBOUND_ENTITY_KIND_SET: ReadonlySet<string> = new Set(OMADEUS_INBOUND_ENTITY_KINDS);
+
 export type OmadeusInboundEntitiesPolicy = {
   enabled: boolean;
   allowedKinds?: OmadeusInboundEntityKind[];

@@ -5,8 +5,9 @@ import {
   type OpenClawConfig,
   type RuntimeEnv,
 } from "../runtime-api.js";
-import { createNugget, resolveTaskChannelRoomId, searchNuggetByNumber } from "./api/nugget.api.js";
+import { createNugget, findNuggetByTaskChannelRoom, resolveTaskChannelRoomId, searchNuggetByNumber } from "./api/nugget.api.js";
 import {
+  appendNuggetContextForTaskOrNuggetRoom,
   appendNuggetLookupContextForAgent,
   parseChannelTaskCreateIntent,
   parseNuggetLookupIntent,
@@ -17,7 +18,10 @@ import { createOmadeusReplyDispatcher } from "./reply-dispatcher.js";
 import { getOmadeusChannelConfig } from "./config.js";
 import { evaluateOmadeusInboundPolicy } from "./inbound-policy.js";
 import { getOmadeusRuntime } from "./runtime.js";
-import type { OmadeusInboundMessage } from "./types.js";
+import {
+  type OmadeusInboundMessage,
+  OMADEUS_INBOUND_ENTITY_KIND_SET,
+} from "./types.js";
 
 type Log = {
   info: (msg: string, extra?: Record<string, unknown>) => void;
@@ -25,6 +29,39 @@ type Log = {
   error: (msg: string, extra?: Record<string, unknown>) => void;
   debug?: (msg: string, extra?: Record<string, unknown>) => void;
 };
+
+const SK = "`subscribableKind`";
+
+/** Injected into BodyForAgent so the model uses Jaguar room kind, not invented OpenClaw `task/...` keys. */
+function buildOmadeusEntityRoomContextLine(kind: string): string {
+  if (kind === "task") {
+    return `This chat is an **Omadeus Task** room (${SK} \`task\`). If the user asks about the Task, its status, or says \"the task\", they mean **this** Omadeus Task / this thread — not an OpenClaw \"task\" or a \"session id\" for it.`;
+  }
+  if (kind === "nugget") {
+    return `This chat is an **Omadeus Nugget** room (${SK} \`nugget\`). If the user asks about the Nugget, its status, or colloquially says \"the task\", they mean **this** Omadeus Nugget / this thread — not an OpenClaw \"task\" or a \"session id\" for it. (Task and Nugget are different; infer from this room's ${SK}.)`;
+  }
+  const other: Record<string, string> = {
+    project: "Project",
+    release: "Release",
+    sprint: "Sprint",
+    summary: "Summary",
+    client: "Client",
+    folder: "Folder",
+  };
+  const label = other[kind] ?? kind;
+  return `This chat is an **Omadeus ${label}** room (${SK} \`${kind}\`). User questions refer to that Omadeus ${label} in this thread — not an OpenClaw \"session id\" for it.`;
+}
+
+function shouldSkipTaskRoomNuggetFetch(rawBody: string): boolean {
+  const t = rawBody.trim();
+  if (!t) {
+    return true;
+  }
+  if (/^(ok|k|thanks?|thank you|ty|sounds good|got it|yes|yep|no|nope)\s*!*\.?$/i.test(t)) {
+    return true;
+  }
+  return false;
+}
 
 export type OmadeusMessageHandlerDeps = {
   cfg: OpenClawConfig;
@@ -152,18 +189,49 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
         const nugget = await searchNuggetByNumber(outboundDeps.apiOpts, {
           nuggetNumber: nuggetIntent.nuggetNumber,
         });
-        bodyForAgent = appendNuggetLookupContextForAgent(
+        bodyForAgent = await appendNuggetLookupContextForAgent(
           rawBody,
           nuggetIntent.nuggetNumber,
           nugget,
+          outboundDeps.apiOpts,
         );
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         runtime.error?.(`omadeus nugget lookup failed: ${errorMessage}`);
-        bodyForAgent = appendNuggetLookupContextForAgent(
+        bodyForAgent = await appendNuggetLookupContextForAgent(
           rawBody,
           nuggetIntent.nuggetNumber,
           null,
+          outboundDeps.apiOpts,
+          errorMessage,
+        );
+      }
+    }
+
+    const isTaskOrNuggetRoom =
+      !isDirectMessage && (inbound.subscribableKind === "task" || inbound.subscribableKind === "nugget");
+    if (isTaskOrNuggetRoom && !nuggetIntent && !createIntent && !shouldSkipTaskRoomNuggetFetch(rawBody)) {
+      try {
+        const nugget = await findNuggetByTaskChannelRoom(outboundDeps.apiOpts, {
+          roomId: inbound.roomId,
+          roomName: inbound.roomName,
+        });
+        bodyForAgent = await appendNuggetContextForTaskOrNuggetRoom(
+          bodyForAgent,
+          inbound.roomId,
+          inbound.roomName,
+          nugget,
+          outboundDeps.apiOpts,
+        );
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        runtime.error?.(`omadeus task room nugget lookup failed: ${errorMessage}`);
+        bodyForAgent = await appendNuggetContextForTaskOrNuggetRoom(
+          bodyForAgent,
+          inbound.roomId,
+          inbound.roomName,
+          null,
+          outboundDeps.apiOpts,
           errorMessage,
         );
       }
@@ -180,6 +248,13 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
         id: isDirectMessage ? senderId : roomId,
       },
     });
+
+    // Omadeus entity rooms (Jaguar subscribableKind): see OmadeusInboundEntityKind,
+    // OMADEUS_INBOUND_ENTITY_KINDS. Models conflate "task" with OpenClaw and invent `task/<title>` keys.
+    if (!isDirectMessage && OMADEUS_INBOUND_ENTITY_KIND_SET.has(String(inbound.subscribableKind))) {
+      const entityLine = buildOmadeusEntityRoomContextLine(String(inbound.subscribableKind));
+      bodyForAgent = `${bodyForAgent}\n\n[OpenClaw] ${entityLine} \`session_status\` is only for **OpenClaw** gateway session state (model/usage, etc.); for that, use this key or \`current\`: ${route.sessionKey} — never \`task/\` + a title as a session key.`;
+    }
 
     const preview = rawBody.replace(/\s+/g, " ").slice(0, 160);
     const inboundLabel = isDirectMessage

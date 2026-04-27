@@ -1,3 +1,7 @@
+import { readNuggetNumber } from "./api/nugget.api.js";
+import { mergePeopleIntoNuggetAgentPayload } from "./member-resolve.js";
+import type { OmadeusApiOptions } from "./utils/http.util.js";
+
 export type NuggetLookupIntent = {
   /** Display nugget number from `N###` (maps to API `number`, not internal `id`). */
   nuggetNumber: number;
@@ -150,6 +154,13 @@ const NUGGET_FIELDS_FOR_AGENT = [
   "releaseNumber",
   "publicRoomId",
   "privateRoomId",
+  "memberReferenceId",
+  "assigneeReferenceId",
+  "ownerReferenceId",
+  "memberFirstName",
+  "memberLastName",
+  "assigneeFirstName",
+  "assigneeLastName",
 ] as const;
 
 export function pickNuggetFieldsForAgent(record: Record<string, unknown>): Record<string, unknown> {
@@ -163,15 +174,30 @@ export function pickNuggetFieldsForAgent(record: Record<string, unknown>): Recor
 }
 
 /**
+ * Picked Dolphin fields + `people` map (referenceId → display name) for the organization.
+ */
+export async function buildNuggetAgentDataPayload(
+  apiOpts: OmadeusApiOptions,
+  fullRecord: Record<string, unknown> | null,
+): Promise<Record<string, unknown> | null> {
+  if (!fullRecord) {
+    return null;
+  }
+  const base = pickNuggetFieldsForAgent(fullRecord);
+  return mergePeopleIntoNuggetAgentPayload(apiOpts, fullRecord, base);
+}
+
+/**
  * Augments the user message so the agent receives Dolphin nugget/task data and can reply with a summary.
  * On miss or API error, the agent still gets instructions to respond helpfully.
  */
-export function appendNuggetLookupContextForAgent(
+export async function appendNuggetLookupContextForAgent(
   rawBody: string,
   nuggetNumber: number,
   record: Record<string, unknown> | null,
+  apiOpts: OmadeusApiOptions,
   fetchError?: string,
-): string {
+): Promise<string> {
   const header = `[Omadeus nugget/task N${nuggetNumber}]`;
 
   if (fetchError) {
@@ -188,9 +214,46 @@ export function appendNuggetLookupContextForAgent(
     );
   }
 
-  const payload = pickNuggetFieldsForAgent(record);
+  const payload = (await buildNuggetAgentDataPayload(apiOpts, record)) ?? pickNuggetFieldsForAgent(record);
   return (
-    `${rawBody}\n\n${header} Data from Omadeus (summarize for someone tracking this work — status, ownership, timeline, project; plain language):\n` +
+    `${rawBody}\n\n${header} Data from Omadeus (summarize for someone tracking this work — status, ownership, timeline, project; plain language. **For assignees and anyone in \`people\` / \`*FirstName\` fields, use those names; never read raw *ReferenceId numbers to the user as a person.**):\n` +
+    `${JSON.stringify(payload, null, 2)}`
+  );
+}
+
+/**
+ * Enriches a Task or Nugget **Jaguar room** with Dolphin data matched by this chat's `roomId`, so the
+ * agent can answer "status" without a bare `N###` in the message.
+ */
+export async function appendNuggetContextForTaskOrNuggetRoom(
+  rawBody: string,
+  roomId: number,
+  roomName: string | null,
+  record: Record<string, unknown> | null,
+  apiOpts: OmadeusApiOptions,
+  fetchError?: string,
+): Promise<string> {
+  const roomLabel = roomName?.trim() ? `room ${roomId} ("${roomName.trim()}")` : `room ${roomId}`;
+
+  if (fetchError) {
+    return (
+      `${rawBody}\n\n[Omadeus, this task/nugget ${roomLabel}] Lookup failed: ${fetchError}.\n` +
+      `Answer from this thread. Do not tell the user to "use the Omadeus platform" or similar — give a direct reply or a concrete next step.`
+    );
+  }
+
+  if (!record) {
+    return (
+      `${rawBody}\n\n[Omadeus, this task/nugget ${roomLabel}] No Dolphin row matched this room id in search yet.\n` +
+      `Answer from the conversation; be honest if you cannot see live fields. Do not hand-wave to "the platform".`
+    );
+  }
+
+  const n = readNuggetNumber(record);
+  const nLabel = n !== undefined ? `N${n}` : "nugget";
+  const payload = (await buildNuggetAgentDataPayload(apiOpts, record)) ?? pickNuggetFieldsForAgent(record);
+  return (
+    `${rawBody}\n\n[Omadeus ${nLabel} for this chat room] The following is live task/nugget data — **answer the user with this** (stage, status, title, who, due date; plain language. **For assignee/owner, use \`people\` and name fields; never recite *ReferenceId numbers (e.g. 210) as a person's name.**). \`task/...\` in the UI is not an OpenClaw session key.\n` +
     `${JSON.stringify(payload, null, 2)}`
   );
 }

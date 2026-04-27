@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   appendNuggetLookupContextForAgent,
   parseChannelTaskCreateIntent,
@@ -7,6 +7,13 @@ import {
   parseTaskChannelTargetIntent,
   pickNuggetFieldsForAgent,
 } from "./nugget-lookup.js";
+import type { OmadeusApiOptions } from "./utils/http.util.js";
+
+vi.mock("./api/auth.api.js", () => ({
+  listOrganizationMembers: vi.fn(async () => [
+    { id: 1, referenceId: 210, firstName: "Casey", lastName: "Demo" },
+  ]),
+}));
 
 describe("parseNuggetLookupIntent", () => {
   it("matches terse nugget id queries", () => {
@@ -85,26 +92,47 @@ describe("pickNuggetFieldsForAgent", () => {
   });
 });
 
+const mockApiOpts = {
+  maestroUrl: "https://maestro.test",
+  tokenManager: {
+    getToken: () => "t",
+    getPayload: () => ({
+      organizationId: 1,
+      id: 1,
+      email: "a@b.c",
+      title: "t",
+      referenceId: 1,
+      sessionId: "s",
+      roles: [] as string[],
+      exp: 9_999_999_999,
+    }),
+  },
+} as OmadeusApiOptions;
+
 describe("appendNuggetLookupContextForAgent", () => {
-  it("appends JSON payload when a record is found", () => {
-    const out = appendNuggetLookupContextForAgent("What's N111?", 111, {
+  it("appends JSON payload when a record is found, with people from member list", async () => {
+    const out = await appendNuggetLookupContextForAgent("What's N111?", 111, {
       number: 111,
       title: "Fix bug",
       status: "complete",
-    });
+      memberReferenceId: 210,
+    }, mockApiOpts);
     expect(out.startsWith("What's N111?")).toBe(true);
     expect(out.toLowerCase()).toContain("summarize for someone");
     expect(out).toContain('"number": 111');
     expect(out).toContain("Fix bug");
+    expect(out).toContain("people");
+    expect(out).toContain("Casey");
+    expect(out).toContain("memberReferenceId");
   });
 
-  it("instructs the agent when nothing matched", () => {
-    const out = appendNuggetLookupContextForAgent("N999", 999, null);
+  it("instructs the agent when nothing matched", async () => {
+    const out = await appendNuggetLookupContextForAgent("N999", 999, null, mockApiOpts);
     expect(out).toContain("not found");
   });
 
-  it("instructs the agent on fetch error", () => {
-    const out = appendNuggetLookupContextForAgent("N1", 1, null, "network down");
+  it("instructs the agent on fetch error", async () => {
+    const out = await appendNuggetLookupContextForAgent("N1", 1, null, mockApiOpts, "network down");
     expect(out).toContain("Lookup failed");
     expect(out).toContain("network down");
   });

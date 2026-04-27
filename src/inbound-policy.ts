@@ -1,8 +1,9 @@
-import type {
-  OmadeusChannelConfig,
-  OmadeusInboundMessage,
-  OmadeusInboundPolicy,
-  OmadeusSubscribableKind,
+import {
+  type OmadeusChannelConfig,
+  type OmadeusInboundMessage,
+  type OmadeusInboundPolicy,
+  OMADEUS_INBOUND_ENTITY_KIND_SET,
+  type OmadeusSubscribableKind,
 } from "./types.js";
 
 /** Default inbound policy when `channels.omadeus.inbound` is absent. */
@@ -18,18 +19,6 @@ export const DEFAULT_INBOUND_POLICY: Required<
 export type InboundPolicyDecision =
   | { allow: true }
   | { allow: false; reason: string; details?: Record<string, unknown> };
-
-/** `subscribableKind` values handled as entity chat (see `OmadeusInboundEntityKind`). */
-const ENTITY_KINDS = new Set<string>([
-  "task",
-  "nugget",
-  "project",
-  "release",
-  "sprint",
-  "summary",
-  "client",
-  "folder",
-]);
 
 function mergePolicy(cfg: OmadeusChannelConfig | undefined) {
   const inbound = cfg?.inbound;
@@ -100,7 +89,7 @@ function channelGeoAllowed(params: {
 
 function entityKindAllowed(kind: OmadeusSubscribableKind, allowedKinds?: string[]): boolean {
   if (!allowedKinds || allowedKinds.length === 0) {
-    return ENTITY_KINDS.has(String(kind));
+    return OMADEUS_INBOUND_ENTITY_KIND_SET.has(String(kind));
   }
   return allowedKinds.includes(String(kind));
 }

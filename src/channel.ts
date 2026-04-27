@@ -201,6 +201,9 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     messageToolHints: () => [
       "- Omadeus routing: **send** uses **room id** (`to` / `target`, e.g. `room:117947` or `117947`). **edit**, **delete**, **react** use the Jaguar **message** `id` (`messageId`, or the current inbound message from context).",
       "- Create Omadeus task/nugget: use `action=send` with params `{ op: \"create_task\"|\"create_nugget\", title, description, priority?, stage?, kind?, memberReferenceId?, clientId?, folderId? }`.",
+      "- Omadeus **Task** and **Nugget** are distinct product types (Jaguar `subscribableKind`). **Project**, **Sprint**, **Release**, **Folder**, **Client**, **Summary**, etc. also have entity chat rooms. User \"task\" / \"the task\" → map to **this room's** `subscribableKind` (Task vs Nugget vs other), not an OpenClaw background task.",
+      "- In Task or Nugget rooms, inbound may include **Dolphin nuggetviews** JSON for this chat's `roomId` — **summarize that** for status questions. The payload may include a **`people`** object (Omadeus member names). Use those for assignees; do not read `referenceId` numbers as names. Do not tell the user to go use the Omadeus app instead of answering from that data or the thread.",
+      "- `session_status` / SessionKey: **OpenClaw** gateway only. Use the inbound SessionKey, \"current\", or the hint in **entity** rooms — never a fake `task/<...>` string from a title.",
       `- Reactions only allow these emojis (others are ignored): ${ALLOWED_OMADEUS_REACTION_EMOJI_LIST.join(" ")}`,
       "- Reply in chat with plain text; use the message tool for proactive sends, edits, deletes, or reactions.",
     ],
