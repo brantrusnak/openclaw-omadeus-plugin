@@ -83,11 +83,7 @@ const omadeusConfigAdapter = createTopLevelChannelConfigAdapter<Account>({
     "password",
     "organizationId",
     "sessionToken",
-    "selectedMemberReferenceId",
-    "selectedChannelViewId",
-    "selectedChannelTitle",
-    "selectedChannelPrivateRoomId",
-    "selectedChannelPublicRoomId",
+    "inbound",
   ],
   // Keep adapter contract satisfied even though Omadeus no longer uses DM allowlists.
   resolveAllowFrom: () => [],
@@ -711,6 +707,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         runtime: ctx.runtime,
         log,
         outboundDeps,
+        selfReferenceId,
       });
 
       // Jaguar socket (chat — DMs, nugget/task/project rooms)

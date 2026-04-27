@@ -52,16 +52,15 @@ Jaguar chat events enter through `src/channel.ts` and are normalized by `src/inb
 `src/message-handler.ts` then processes the normalized message:
 
 1. Drop empty messages.
-2. Enforce selected channel/member scope when configured.
-3. Require a mention for group/task messages unless selected-scope rules allow the message.
-4. Apply the OpenClaw control-command gate.
-5. Debounce regular inbound messages by room and sender.
-6. Handle Omadeus task/nugget create intents before dispatch when detected.
-7. Add nugget lookup context for references such as task/nugget numbers.
-8. Resolve the OpenClaw route (`sessionKey`, `agentId`, `accountId`).
-9. Build the agent envelope and context payload.
-10. Record inbound session metadata.
-11. Dispatch the turn through OpenClaw's reply pipeline.
+2. Evaluate `channels.omadeus.inbound` via `src/inbound-policy.ts` (direct, channel, and entity surfaces; sender and room/view allowlists; mention rules). Self-authored Jaguar messages are always dropped.
+3. Apply the OpenClaw control-command gate.
+4. Debounce regular inbound messages by room and sender.
+5. Handle Omadeus task/nugget create intents before dispatch when detected.
+6. Add nugget lookup context for references such as task/nugget numbers.
+7. Resolve the OpenClaw route (`sessionKey`, `agentId`, `accountId`).
+8. Build the agent envelope and context payload.
+9. Record inbound session metadata.
+10. Dispatch the turn through OpenClaw's reply pipeline.
 
 The context payload sets `MessageSid` to the Jaguar message id. That lets `edit`, `delete`, and `react` default to the current inbound message when the agent invokes a message action from the same turn.
 
@@ -113,7 +112,7 @@ Supported setup environment variables:
 - `OMADEUS_PASSWORD`
 - `OMADEUS_ORGANIZATION_ID`
 
-Primary config fields live under `channels.omadeus`: `enabled`, `casUrl`, `maestroUrl`, `email`, `password`, `organizationId`, `sessionToken`, selected member id, and selected channel room/view fields.
+Primary config fields live under `channels.omadeus`: `enabled`, `casUrl`, `maestroUrl`, `email`, `password`, `organizationId`, `sessionToken`, and `inbound` (Jaguar chat policy for direct messages, channel rooms, and entity rooms).
 
 ## Socket Contract
 

@@ -2,6 +2,49 @@
 // Omadeus config shape (stored under channels.omadeus in OpenClaw config)
 // ---------------------------------------------------------------------------
 
+export type OmadeusInboundMentionPolicy = "never" | "always" | "outsideAllowlist";
+
+export type OmadeusInboundDirectPolicy = {
+  enabled: boolean;
+  allowedSenderReferenceIds?: number[];
+  requireMention?: "never" | "always";
+};
+
+export type OmadeusInboundChannelsPolicy = {
+  enabled: boolean;
+  allowedRoomIds?: number[];
+  allowedChannelViewIds?: number[];
+  allowedSenderReferenceIds?: number[];
+  requireMention?: OmadeusInboundMentionPolicy;
+};
+
+/** Jaguar `subscribableKind` values treated as entity chat (not DM, not channel). */
+export type OmadeusInboundEntityKind =
+  | "task"
+  | "nugget"
+  | "project"
+  | "release"
+  | "sprint"
+  | "summary"
+  | "client"
+  | "folder";
+
+export type OmadeusInboundEntitiesPolicy = {
+  enabled: boolean;
+  allowedKinds?: OmadeusInboundEntityKind[];
+  allowedRoomIds?: number[];
+  allowedSenderReferenceIds?: number[];
+  requireMention?: OmadeusInboundMentionPolicy;
+};
+
+/** Jaguar chat ingress policy (DMs, channel rooms, entity rooms). */
+export type OmadeusInboundPolicy = {
+  version?: number;
+  direct?: OmadeusInboundDirectPolicy;
+  channels?: OmadeusInboundChannelsPolicy;
+  entities?: OmadeusInboundEntitiesPolicy;
+};
+
 export type OmadeusChannelConfig = {
   enabled?: boolean;
   casUrl?: string;
@@ -11,13 +54,8 @@ export type OmadeusChannelConfig = {
   organizationId?: number;
   /** Cached Omadeus session JWT obtained during onboarding/startup. */
   sessionToken?: string;
-  /** Selected member reference ID (account) used by onboarding. */
-  selectedMemberReferenceId?: number;
-  /** Selected channel metadata used for inbound filtering. */
-  selectedChannelViewId?: number;
-  selectedChannelTitle?: string;
-  selectedChannelPrivateRoomId?: number;
-  selectedChannelPublicRoomId?: number;
+  /** Jaguar chat ingress allowlists and mention rules. */
+  inbound?: OmadeusInboundPolicy;
 };
 
 export type ResolvedOmadeusAccount = {
@@ -101,6 +139,13 @@ export type OmadeusJwtPayload = {
 // Jaguar socket message (chat — DMs, nugget rooms, task rooms, etc.)
 // ---------------------------------------------------------------------------
 
+/**
+ * Omadeus subscribable **type** on Jaguar chat payloads (room context).
+ *
+ * - **direct** — DM from a user.
+ * - **channel** — message in a channel room.
+ * - **nugget** … **folder** — entity-associated chat (tasks, work items, hierarchy).
+ */
 export type OmadeusSubscribableType =
   | "direct"
   | "channel"
@@ -112,6 +157,15 @@ export type OmadeusSubscribableType =
   | "client"
   | "folder"
   | (string & {});
+
+/**
+ * Omadeus subscribable **kind** on Jaguar chat payloads (same coarse buckets as `OmadeusSubscribableType`;
+ * routing uses `subscribableKind` in the plugin).
+ *
+ * - **direct** — DM from a user.
+ * - **channel** — message in a channel room.
+ * - **task**, **nugget**, **project**, **release**, **sprint**, **summary**, **client**, **folder** — entity chat.
+ */
 export type OmadeusSubscribableKind =
   | "task"
   | "direct"
@@ -181,6 +235,8 @@ export type OmadeusInboundMessage = {
   roomName: string | null;
   subscribableType: OmadeusSubscribableType;
   subscribableKind: OmadeusSubscribableKind;
+  /** When present, used with `inbound.channels.allowedChannelViewIds`. */
+  channelViewId?: number;
   isMention: boolean;
   timestamp: number;
 };

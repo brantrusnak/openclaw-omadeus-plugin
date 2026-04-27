@@ -15,6 +15,7 @@ import {
 import type { OutboundDeps } from "./outbound.js";
 import { createOmadeusReplyDispatcher } from "./reply-dispatcher.js";
 import { getOmadeusChannelConfig } from "./config.js";
+import { evaluateOmadeusInboundPolicy } from "./inbound-policy.js";
 import { getOmadeusRuntime } from "./runtime.js";
 import type { OmadeusInboundMessage } from "./types.js";
 
@@ -30,10 +31,12 @@ export type OmadeusMessageHandlerDeps = {
   runtime: RuntimeEnv;
   log: Log;
   outboundDeps: OutboundDeps;
+  /** Authenticated Omadeus user; used to drop self-authored messages and inbound policy. */
+  selfReferenceId: number;
 };
 
 export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
-  const { cfg, runtime, log, outboundDeps } = deps;
+  const { cfg, runtime, log, outboundDeps, selfReferenceId } = deps;
   const core = getOmadeusRuntime();
   const omadeusCfg = getOmadeusChannelConfig(cfg);
 
@@ -54,54 +57,25 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
       return;
     }
 
-    const selectedPublicRoomId = omadeusCfg?.selectedChannelPublicRoomId;
-    const selectedPrivateRoomId = omadeusCfg?.selectedChannelPrivateRoomId;
-    const selectedMemberReferenceId = omadeusCfg?.selectedMemberReferenceId;
-    const hasSelectedScope =
-      typeof selectedPublicRoomId === "number" || typeof selectedPrivateRoomId === "number";
-    let inSelectedChannelRoom = false;
-    let isSelectedMemberTaskPrivate = false;
-    if (hasSelectedScope) {
-      inSelectedChannelRoom =
-        inbound.roomId === selectedPublicRoomId || inbound.roomId === selectedPrivateRoomId;
-      const isSelectedMember =
-        typeof selectedMemberReferenceId !== "number" ||
-        inbound.fromReferenceId === selectedMemberReferenceId;
-      isSelectedMemberTaskPrivate =
-        inbound.subscribableKind === "task" && inbound.isMention && isSelectedMember;
-      const allowSelectedChannelMessage = inSelectedChannelRoom && isSelectedMember;
-      if (!allowSelectedChannelMessage && !isSelectedMemberTaskPrivate) {
-        log.info("omadeus: dropped message outside selected channel scope", {
-          roomId: inbound.roomId,
-          roomName: inbound.roomName,
-          selectedPublicRoomId,
-          selectedPrivateRoomId,
-          selectedMemberReferenceId,
-          kind: inbound.subscribableKind,
-          fromReferenceId: inbound.fromReferenceId,
-          isMention: inbound.isMention,
-          selectedMemberMatched: isSelectedMember,
-        });
-        return;
-      }
+    const policyDecision = evaluateOmadeusInboundPolicy({
+      inbound,
+      omadeusCfg,
+      selfReferenceId,
+    });
+    if (!policyDecision.allow) {
+      log.info("omadeus: dropped message by inbound policy", {
+        reason: policyDecision.reason,
+        ...(policyDecision.details ?? {}),
+        roomId: inbound.roomId,
+        kind: inbound.subscribableKind,
+        fromReferenceId: inbound.fromReferenceId,
+        isMention: inbound.isMention,
+      });
+      return;
     }
 
     const useAccessGroups =
       (cfg.commands as Record<string, unknown> | undefined)?.useAccessGroups !== false;
-
-    // For group messages, only respond when mentioned (unless groupPolicy is open)
-    const bypassMentionGate = hasSelectedScope && (inSelectedChannelRoom || isSelectedMemberTaskPrivate);
-    if (!isDirectMessage && !inbound.isMention && !bypassMentionGate) {
-      log.debug?.("skipping group message (not mentioned)");
-      return;
-    }
-    if (!isDirectMessage && !inbound.isMention && bypassMentionGate) {
-      log.info("omadeus: processing selected-scope group message without mention", {
-        roomId: inbound.roomId,
-        roomName: inbound.roomName,
-        kind: inbound.subscribableKind,
-      });
-    }
 
     const hasControlCommand = core.channel.text.hasControlCommand(rawBody, cfg);
     const commandGate = resolveControlCommandGate({
@@ -125,10 +99,7 @@ export function createOmadeusMessageHandler(deps: OmadeusMessageHandlerDeps) {
     const createIntent = parseChannelTaskCreateIntent(rawBody);
     if (createIntent) {
       try {
-        const memberReferenceId =
-          typeof selectedMemberReferenceId === "number"
-            ? selectedMemberReferenceId
-            : inbound.fromReferenceId;
+        const memberReferenceId = inbound.fromReferenceId;
         const created = await createNugget(outboundDeps.apiOpts, {
           title: createIntent.title,
           description: createIntent.description,

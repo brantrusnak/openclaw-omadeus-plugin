@@ -56,6 +56,23 @@ function stripLeadingMention(body: string): string {
   return body.replace(/^\*\*@[^*]+\*\*\s*/, "").trim();
 }
 
+function readChannelViewId(metadata: unknown): number | undefined {
+  if (metadata === null || metadata === undefined || typeof metadata !== "object") {
+    return undefined;
+  }
+  const m = metadata as Record<string, unknown>;
+  for (const key of ["channelViewId", "channel_view_id", "viewId", "subscribableViewId"]) {
+    const v = m[key];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return v;
+    }
+    if (typeof v === "string" && /^\d+$/.test(v.trim())) {
+      return Number(v.trim());
+    }
+  }
+  return undefined;
+}
+
 /**
  * Determine whether a raw Jaguar socket payload is an OmadeusMessage.
  */
@@ -95,6 +112,8 @@ export function parseJaguarMessage(
 
   if (!content) return null;
 
+  const channelViewId = readChannelViewId(msg.metadata);
+
   return {
     messageId: msg.id,
     from: String(msg.senderReferenceId),
@@ -104,6 +123,7 @@ export function parseJaguarMessage(
     roomName: msg.roomName,
     subscribableType: msg.subscribableType,
     subscribableKind: msg.subscribableKind,
+    ...(channelViewId !== undefined ? { channelViewId } : {}),
     isMention: mentioned,
     timestamp: msg.createdAtTimestamp
       ? Math.floor(msg.createdAtTimestamp * 1000)

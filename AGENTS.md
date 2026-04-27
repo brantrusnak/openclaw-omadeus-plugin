@@ -16,7 +16,7 @@
 - `src/channel.ts`: main `ChannelPlugin` definition, actions, config adapter, outbound adapter, status, and gateway startup.
 - `src/config.ts`: account/config resolution and defaults.
 - `src/setup-core.ts`, `src/setup-surface.ts`, `src/onboarding.ts`: setup/configuration flow.
-- `src/inbound.ts`, `src/message-handler.ts`, `src/reply-dispatcher.ts`, `src/outbound.ts`: receive, route, reply, and send flow.
+- `src/inbound.ts`, `src/inbound-policy.ts`, `src/message-handler.ts`, `src/reply-dispatcher.ts`, `src/outbound.ts`: receive, route, reply, and send flow.
 - `src/token.ts`, `src/socket/*`, `src/api/*`: auth refresh, WebSocket clients, and Omadeus REST calls.
 
 ## Local Rules
@@ -32,7 +32,7 @@
 - `send` targets Omadeus room ids: `room:123` or `123`. Task-like targets such as `N123`/`T123` may be resolved to a room by `src/nugget-lookup.ts`.
 - `edit`, `delete`, and `react` use Jaguar message ids, not room ids. Current inbound messages expose that id as `MessageSid`.
 - Reactions are restricted by `src/allowed-reaction-emojis.ts`; unsupported emoji are ignored with a successful structured result.
-- Setup writes `channels.omadeus` and can use `OMADEUS_EMAIL`, `OMADEUS_PASSWORD`, and `OMADEUS_ORGANIZATION_ID`.
+- Setup writes `channels.omadeus` (including `inbound` for Jaguar allowlists and mention rules) and can use `OMADEUS_EMAIL`, `OMADEUS_PASSWORD`, and `OMADEUS_ORGANIZATION_ID`.
 
 ## Validation
 

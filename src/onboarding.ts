@@ -1,10 +1,10 @@
 import type { ChannelSetupWizard, OpenClawConfig, WizardPrompter } from "openclaw/plugin-sdk/setup";
 import { DEFAULT_ACCOUNT_ID, formatDocsLink } from "openclaw/plugin-sdk/setup";
 import {
-  listMemberChannelViews,
   listOrganizationMembers,
   listOrganizations,
 } from "./api/auth.api.js";
+import { listMemberChannelViews } from "./api/channel.api.js";
 import { authenticate } from "./auth.js";
 import { getOmadeusChannelConfig, resolveOmadeusAccount } from "./config.js";
 import { OMADEUS_CAS_URL, OMADEUS_MAESTRO_URL } from "./defaults.js";
@@ -15,9 +15,32 @@ import type {
 } from "./types.js";
 
 const channel = "omadeus" as const;
+const ALL_USERS = "__all_users__";
+const DONE = "__done__";
 
 type CoreConfig = OpenClawConfig & {
   channels?: { omadeus?: OmadeusChannelConfig };
+};
+
+type SelectOption = {
+  value: string;
+  label: string;
+  hint?: string;
+};
+
+type MultiSelectPrompter = {
+  multiSelect?: (args: {
+    message: string;
+    options: SelectOption[];
+    initialValues?: string[];
+    initialValue?: string[];
+  }) => Promise<string[]>;
+  multiselect?: (args: {
+    message: string;
+    options: SelectOption[];
+    initialValues?: string[];
+    initialValue?: string[];
+  }) => Promise<string[]>;
 };
 
 function getOmadeusSection(cfg: OpenClawConfig): OmadeusChannelConfig | undefined {
@@ -97,14 +120,9 @@ async function promptChannelSelection(params: {
   maestroUrl: string;
   sessionToken: string;
   memberReferenceId: number;
-  existing?: OmadeusChannelConfig;
-}): Promise<{
-  selectedChannelViewId: number;
-  selectedChannelTitle: string;
-  selectedChannelPrivateRoomId?: number;
-  selectedChannelPublicRoomId?: number;
-}> {
-  const { prompter, maestroUrl, sessionToken, memberReferenceId, existing } = params;
+  existingChannelViewIds?: number[];
+}): Promise<OmadeusChannelView[]> {
+  const { prompter, maestroUrl, sessionToken, memberReferenceId, existingChannelViewIds } = params;
   const channels = await listMemberChannelViews({
     maestroUrl,
     sessionToken,
@@ -115,31 +133,26 @@ async function promptChannelSelection(params: {
   if (channels.length === 0) {
     throw new Error("No channels found for this account.");
   }
-  const selected = await prompter.select({
-    message: "Which channel to use?",
+  const selected = await promptMultiSelect({
+    prompter,
+    message: "Which channels should OpenClaw listen to?",
     options: channels.map((item) => ({
       value: String(item.id),
       label: item.title || `Channel ${item.id}`,
+      hint: [item.privateRoomId ? `private:${item.privateRoomId}` : undefined, item.publicRoomId ? `public:${item.publicRoomId}` : undefined]
+        .filter(Boolean)
+        .join(" | "),
     })),
-    initialValue:
-      existing?.selectedChannelViewId !== undefined
-        ? String(existing.selectedChannelViewId)
-        : String(channels[0]!.id),
+    initialValues:
+      existingChannelViewIds && existingChannelViewIds.length > 0
+        ? existingChannelViewIds.map(String)
+        : [String(channels[0]!.id)],
   });
-  const chosen = channels.find((item) => String(item.id) === String(selected));
-  if (!chosen) {
-    throw new Error("Selected channel was not found.");
+  const chosen = channels.filter((item) => selected.includes(String(item.id)));
+  if (chosen.length === 0) {
+    throw new Error("At least one channel must be selected.");
   }
-  return {
-    selectedChannelViewId: chosen.id,
-    selectedChannelTitle: chosen.title,
-    ...(typeof chosen.privateRoomId === "number"
-      ? { selectedChannelPrivateRoomId: chosen.privateRoomId }
-      : {}),
-    ...(typeof chosen.publicRoomId === "number"
-      ? { selectedChannelPublicRoomId: chosen.publicRoomId }
-      : {}),
-  };
+  return chosen;
 }
 
 function memberLabel(member: OmadeusOrganizationMember): string {
@@ -162,93 +175,110 @@ function memberHint(member: OmadeusOrganizationMember): string | undefined {
   return parts.length > 0 ? parts.join(" | ") : undefined;
 }
 
-function filterMembersByQuery(
-  members: OmadeusOrganizationMember[],
-  query: string,
-): OmadeusOrganizationMember[] {
-  const q = query.trim().toLowerCase();
-  if (!q) {
-    return members;
+async function promptMultiSelect(params: {
+  prompter: WizardPrompter;
+  message: string;
+  options: SelectOption[];
+  initialValues?: string[];
+}): Promise<string[]> {
+  const multi = params.prompter as unknown as MultiSelectPrompter;
+  const runMulti = multi.multiSelect ?? multi.multiselect;
+  if (runMulti) {
+    return runMulti({
+      message: params.message,
+      options: params.options,
+      initialValues: params.initialValues,
+      initialValue: params.initialValues,
+    });
   }
-  return members.filter((member) => {
-    const fields = [
-      String(member.referenceId),
-      member.title ?? "",
-      member.firstName ?? "",
-      member.lastName ?? "",
-      member.email ?? "",
-    ].map((value) => value.toLowerCase());
-    return fields.some((value) => value.includes(q));
-  });
+
+  const selected = new Set(params.initialValues ?? []);
+  while (true) {
+    const next = await params.prompter.select({
+      message: `${params.message} (${selected.size} selected)`,
+      options: [
+        { value: DONE, label: selected.size > 0 ? "Done" : "Done (select none)" },
+        ...params.options.map((option) => ({
+          ...option,
+          label: selected.has(option.value) ? `[selected] ${option.label}` : option.label,
+        })),
+      ],
+      initialValue: DONE,
+    });
+    const value = String(next);
+    if (value === DONE) {
+      return [...selected];
+    }
+    if (selected.has(value)) {
+      selected.delete(value);
+    } else {
+      selected.add(value);
+    }
+  }
 }
 
-async function promptMemberSelection(params: {
-  prompter: WizardPrompter;
+async function loadSelectableMembers(params: {
   maestroUrl: string;
   sessionToken: string;
   organizationId: number;
-  existingMemberReferenceId?: number;
-  fallbackMemberReferenceId?: number;
-}): Promise<{ memberReferenceId: number; memberTitle: string }> {
-  const {
-    prompter,
-    maestroUrl,
-    sessionToken,
-    organizationId,
-    existingMemberReferenceId,
-    fallbackMemberReferenceId,
-  } = params;
-
-  const members = (
+}): Promise<OmadeusOrganizationMember[]> {
+  return (
     await listOrganizationMembers({
-      maestroUrl,
-      sessionToken,
-      organizationId,
+      maestroUrl: params.maestroUrl,
+      sessionToken: params.sessionToken,
+      organizationId: params.organizationId,
     })
   )
     .filter((member) => member.isSystem !== true)
     .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)));
+}
 
+function memberOptions(members: OmadeusOrganizationMember[]): SelectOption[] {
+  return members.map((member) => ({
+    value: String(member.referenceId),
+    label: memberLabel(member),
+    hint: memberHint(member),
+  }));
+}
+
+function readReferenceIds(values: string[]): number[] {
+  return values
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function promptSenderAllowlist(params: {
+  prompter: WizardPrompter;
+  message: string;
+  members: OmadeusOrganizationMember[];
+  existingReferenceIds?: number[];
+  includeAllUsersOption?: boolean;
+}): Promise<number[] | undefined> {
+  const { prompter, message, members, existingReferenceIds, includeAllUsersOption = true } = params;
   if (members.length === 0) {
     throw new Error("No organization members found.");
   }
-
-  while (true) {
-    const query = String(
-      await prompter.text({
-        message: "Search member to listen to (name/title/email/referenceId, optional)",
-        placeholder: "e.g. John Doe",
-      }),
-    );
-    const filtered = filterMembersByQuery(members, query).slice(0, 100);
-    if (filtered.length === 0) {
-      await prompter.note("No members matched that search. Try another query.", "Omadeus member");
-      continue;
-    }
-
-    const defaultRef = existingMemberReferenceId ?? fallbackMemberReferenceId;
-    const selected = await prompter.select({
-      message: "Which member should OpenClaw listen to?",
-      options: filtered.map((member) => ({
-        value: String(member.referenceId),
-        label: memberLabel(member),
-        hint: memberHint(member),
-      })),
-      initialValue:
-        defaultRef !== undefined && filtered.some((member) => member.referenceId === defaultRef)
-          ? String(defaultRef)
-          : String(filtered[0]!.referenceId),
-    });
-    const chosen = filtered.find((member) => String(member.referenceId) === String(selected));
-    if (!chosen) {
-      await prompter.note("Could not resolve selected member. Please retry.", "Omadeus member");
-      continue;
-    }
-    return {
-      memberReferenceId: chosen.referenceId,
-      memberTitle: memberLabel(chosen),
-    };
+  const initialValues =
+    existingReferenceIds && existingReferenceIds.length > 0
+      ? existingReferenceIds.map(String)
+      : includeAllUsersOption
+        ? [ALL_USERS]
+        : [];
+  const selected = await promptMultiSelect({
+    prompter,
+    message,
+    options: [
+      ...(includeAllUsersOption
+        ? [{ value: ALL_USERS, label: "All users", hint: "No sender allowlist" }]
+        : []),
+      ...memberOptions(members),
+    ],
+    initialValues,
+  });
+  if (selected.includes(ALL_USERS)) {
+    return undefined;
   }
+  return readReferenceIds(selected);
 }
 
 export const omadeusSetupWizard: ChannelSetupWizard = {
@@ -372,26 +402,68 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       throw new Error("Authentication is required to list channels.");
     }
 
-    const selectedMember = await promptMemberSelection({
-      prompter,
+    if (typeof selfReferenceId !== "number") {
+      throw new Error("Authentication did not return an Omadeus member reference ID.");
+    }
+
+    const members = await loadSelectableMembers({
       maestroUrl,
       sessionToken,
       organizationId,
-      existingMemberReferenceId: section.selectedMemberReferenceId,
-      fallbackMemberReferenceId: selfReferenceId,
+    });
+    const existingInbound = section.inbound;
+
+    const directSenderIds = await promptSenderAllowlist({
+      prompter,
+      message: "Which users can DM OpenClaw directly?",
+      members,
+      existingReferenceIds: existingInbound?.direct?.allowedSenderReferenceIds,
     });
 
-    const selectedChannel = await promptChannelSelection({
+    const selectedChannels = await promptChannelSelection({
       prompter,
       maestroUrl,
       sessionToken,
-      memberReferenceId: selectedMember.memberReferenceId,
-      existing: section,
+      memberReferenceId: selfReferenceId,
+      existingChannelViewIds: existingInbound?.channels?.allowedChannelViewIds,
     });
 
+    const channelSenderIds = await promptSenderAllowlist({
+      prompter,
+      message: "Which users can trigger OpenClaw from allowed channels?",
+      members,
+      existingReferenceIds: existingInbound?.channels?.allowedSenderReferenceIds,
+    });
+
+    const entitySenderIds = await promptSenderAllowlist({
+      prompter,
+      message: "Which users can trigger OpenClaw from entity rooms?",
+      members,
+      existingReferenceIds: existingInbound?.entities?.allowedSenderReferenceIds,
+    });
+
+    const channelRoomIds = selectedChannels
+      .flatMap((selectedChannel) => [
+        selectedChannel.publicRoomId,
+        selectedChannel.privateRoomId,
+      ])
+      .filter((id): id is number => typeof id === "number");
+    const channelViewIds = selectedChannels.map((selectedChannel) => selectedChannel.id);
+    const channelTitles = selectedChannels
+      .map((selectedChannel) => selectedChannel.title || `Channel ${selectedChannel.id}`)
+      .join(", ");
+
+    const senderSummary = (ids: number[] | undefined) =>
+      ids && ids.length > 0 ? ids.join(", ") : "all users";
+
     await prompter.note(
-      `Omadeus will process only "${selectedChannel.selectedChannelTitle}" for member ${selectedMember.memberTitle} (${selectedMember.memberReferenceId}), plus task private-chat mentions.`,
-      "Omadeus channel scope",
+      [
+        `Inbound policy (Jaguar chat):`,
+        `- Direct messages: enabled for ${senderSummary(directSenderIds)} (no @mention required).`,
+        `- Channels "${channelTitles}": rooms ${channelRoomIds.join(", ") || "(no room ids)"} from ${senderSummary(channelSenderIds)}; @mention not required in those rooms.`,
+        `- Entity rooms (task, nugget, project, release, sprint, summary, client, folder): ${senderSummary(entitySenderIds)}; @mention required.`,
+      ].join("\n"),
+      "Omadeus inbound policy",
     );
 
     next = {
@@ -399,7 +471,6 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       channels: {
         ...next.channels,
         omadeus: {
-          ...getOmadeusSection(next),
           enabled: true,
           casUrl,
           maestroUrl,
@@ -407,15 +478,36 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
           password,
           organizationId,
           ...(sessionToken ? { sessionToken } : {}),
-          selectedMemberReferenceId: selectedMember.memberReferenceId,
-          selectedChannelViewId: selectedChannel.selectedChannelViewId,
-          selectedChannelTitle: selectedChannel.selectedChannelTitle,
-          ...(selectedChannel.selectedChannelPrivateRoomId !== undefined
-            ? { selectedChannelPrivateRoomId: selectedChannel.selectedChannelPrivateRoomId }
-            : {}),
-          ...(selectedChannel.selectedChannelPublicRoomId !== undefined
-            ? { selectedChannelPublicRoomId: selectedChannel.selectedChannelPublicRoomId }
-            : {}),
+          inbound: {
+            version: 1,
+            direct: {
+              enabled: true,
+              ...(directSenderIds ? { allowedSenderReferenceIds: directSenderIds } : {}),
+              requireMention: "never",
+            },
+            channels: {
+              enabled: true,
+              allowedRoomIds: channelRoomIds,
+              allowedChannelViewIds: channelViewIds,
+              ...(channelSenderIds ? { allowedSenderReferenceIds: channelSenderIds } : {}),
+              requireMention: "outsideAllowlist",
+            },
+            entities: {
+              enabled: true,
+              allowedKinds: [
+                "task",
+                "nugget",
+                "project",
+                "release",
+                "sprint",
+                "summary",
+                "client",
+                "folder",
+              ],
+              ...(entitySenderIds ? { allowedSenderReferenceIds: entitySenderIds } : {}),
+              requireMention: "always",
+            },
+          },
         },
       },
     };
