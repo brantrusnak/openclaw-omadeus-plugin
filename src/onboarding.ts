@@ -11,12 +11,22 @@ import { OMADEUS_CAS_URL, OMADEUS_MAESTRO_URL } from "./defaults.js";
 import type {
   OmadeusChannelConfig,
   OmadeusChannelView,
+  OmadeusInboundEntityKind,
   OmadeusOrganizationMember,
 } from "./types.js";
 
 const channel = "omadeus" as const;
-const ALL_USERS = "__all_users__";
 const DONE = "__done__";
+const ALL_ENTITY_KINDS: OmadeusInboundEntityKind[] = [
+  "task",
+  "nugget",
+  "project",
+  "release",
+  "sprint",
+  "summary",
+  "client",
+  "folder",
+];
 
 type CoreConfig = OpenClawConfig & {
   channels?: { omadeus?: OmadeusChannelConfig };
@@ -254,33 +264,50 @@ async function promptSenderAllowlist(params: {
   message: string;
   members: OmadeusOrganizationMember[];
   existingReferenceIds?: number[];
-  includeAllUsersOption?: boolean;
 }): Promise<number[] | undefined> {
-  const { prompter, message, members, existingReferenceIds, includeAllUsersOption = true } = params;
+  const { prompter, message, members, existingReferenceIds } = params;
   if (members.length === 0) {
     throw new Error("No organization members found.");
   }
-  const initialValues =
-    existingReferenceIds && existingReferenceIds.length > 0
-      ? existingReferenceIds.map(String)
-      : includeAllUsersOption
-        ? [ALL_USERS]
-        : [];
-  const selected = await promptMultiSelect({
-    prompter,
+
+  const mode = await prompter.select({
     message,
     options: [
-      ...(includeAllUsersOption
-        ? [{ value: ALL_USERS, label: "All users", hint: "No sender allowlist" }]
-        : []),
-      ...memberOptions(members),
+      { value: "all", label: "All users", hint: "No sender allowlist" },
+      { value: "specific", label: "Specific users", hint: "Select one or more users" },
     ],
-    initialValues,
+    initialValue: existingReferenceIds && existingReferenceIds.length > 0 ? "specific" : "all",
   });
-  if (selected.includes(ALL_USERS)) {
+  if (String(mode) === "all") {
     return undefined;
   }
+
+  const selected = await promptMultiSelect({
+    prompter,
+    message: `${message} (specific users)`,
+    options: memberOptions(members),
+    initialValues: existingReferenceIds?.map(String),
+  });
   return readReferenceIds(selected);
+}
+
+async function promptEntityKindSelection(params: {
+  prompter: WizardPrompter;
+  existingKinds?: OmadeusInboundEntityKind[];
+}): Promise<OmadeusInboundEntityKind[]> {
+  const selected = await promptMultiSelect({
+    prompter: params.prompter,
+    message: "Which entity room types should OpenClaw listen to?",
+    options: ALL_ENTITY_KINDS.map((kind) => ({
+      value: kind,
+      label: kind,
+    })),
+    initialValues:
+      params.existingKinds && params.existingKinds.length > 0
+        ? params.existingKinds
+        : ALL_ENTITY_KINDS,
+  });
+  return ALL_ENTITY_KINDS.filter((kind) => selected.includes(kind));
 }
 
 export const omadeusSetupWizard: ChannelSetupWizard = {
@@ -438,12 +465,20 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       existingReferenceIds: existingInbound?.channels?.allowedSenderReferenceIds,
     });
 
-    const entitySenderIds = await promptSenderAllowlist({
+    const entityKinds = await promptEntityKindSelection({
       prompter,
-      message: "Which users can trigger OpenClaw from entity rooms?",
-      members,
-      existingReferenceIds: existingInbound?.entities?.allowedSenderReferenceIds,
+      existingKinds: existingInbound?.entities?.allowedKinds,
     });
+
+    const entitySenderIds =
+      entityKinds.length > 0
+        ? await promptSenderAllowlist({
+            prompter,
+            message: "Which users can trigger OpenClaw from entity rooms?",
+            members,
+            existingReferenceIds: existingInbound?.entities?.allowedSenderReferenceIds,
+          })
+        : undefined;
 
     const channelRoomIds = selectedChannels
       .flatMap((selectedChannel) => [
@@ -458,13 +493,15 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
 
     const senderSummary = (ids: number[] | undefined) =>
       ids && ids.length > 0 ? ids.join(", ") : "all users";
+    const entityKindSummary =
+      entityKinds.length > 0 ? entityKinds.join(", ") : "none (entity rooms disabled)";
 
     await prompter.note(
       [
         `Inbound policy (Jaguar chat):`,
         `- Direct messages: enabled for ${senderSummary(directSenderIds)} (no @mention required).`,
         `- Channels "${channelTitles}": rooms ${channelRoomIds.join(", ") || "(no room ids)"} from ${senderSummary(channelSenderIds)}; @mention not required in those rooms.`,
-        `- Entity rooms (task, nugget, project, release, sprint, summary, client, folder): ${senderSummary(entitySenderIds)}; @mention required.`,
+        `- Entity rooms (${entityKindSummary}): ${senderSummary(entitySenderIds)}; @mention required.`,
       ].join("\n"),
       "Omadeus inbound policy",
     );
@@ -496,17 +533,8 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
               requireMention: "outsideAllowlist",
             },
             entities: {
-              enabled: true,
-              allowedKinds: [
-                "task",
-                "nugget",
-                "project",
-                "release",
-                "sprint",
-                "summary",
-                "client",
-                "folder",
-              ],
+              enabled: entityKinds.length > 0,
+              allowedKinds: entityKinds,
               ...(entitySenderIds ? { allowedSenderReferenceIds: entitySenderIds } : {}),
               requireMention: "always",
             },
