@@ -1,6 +1,6 @@
 # OpenClaw Omadeus Plugin
 
-Omadeus channel plugin for [OpenClaw](https://www.npmjs.com/package/openclaw).
+[Omadeus](https://omadeus.com) plugin for [OpenClaw](https://www.npmjs.com/package/openclaw).
 
 This plugin connects OpenClaw to Omadeus over WebSocket so OpenClaw can listen
 for Omadeus messages and reply through the selected Omadeus channel.
