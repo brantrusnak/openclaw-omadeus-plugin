@@ -60,22 +60,24 @@ let lastPersistedToken: string | null = null;
 async function persistSessionToken(token: string): Promise<void> {
   if (lastPersistedToken === token) return;
   const runtime = getOmadeusRuntime();
-  const cfg = runtime.config.loadConfig();
+  const cfg = runtime.config.current() as OpenClawConfig;
   const section = getOmadeusChannelConfig(cfg) ?? {};
   if (section.sessionToken === token) {
     lastPersistedToken = token;
     return;
   }
-  await runtime.config.writeConfigFile({
-    ...cfg,
-    channels: {
-      ...cfg.channels,
-      omadeus: {
-        ...section,
-        sessionToken: token,
-      },
+  await runtime.config.mutateConfigFile({
+    afterWrite: { mode: "auto" },
+    mutate: (draft) => {
+      draft.channels = {
+        ...(draft.channels ?? {}),
+        omadeus: {
+          ...(getOmadeusChannelConfig(draft) ?? {}),
+          sessionToken: token,
+        },
+      };
     },
-  } as OpenClawConfig);
+  });
   lastPersistedToken = token;
 }
 
