@@ -8,29 +8,17 @@ import { listMemberChannelViews } from "./api/channel.api.js";
 import { authenticate } from "./auth.js";
 import { getOmadeusChannelConfig, resolveOmadeusAccount } from "./config.js";
 import { OMADEUS_CAS_URL, OMADEUS_MAESTRO_URL } from "./defaults.js";
+import { formatMemberLabel } from "./member-resolve.js";
 import type {
   OmadeusChannelConfig,
   OmadeusChannelView,
   OmadeusInboundEntityKind,
   OmadeusOrganizationMember,
 } from "./types.js";
+import { OMADEUS_INBOUND_ENTITY_KINDS } from "./types.js";
 
 const channel = "omadeus" as const;
 const DONE = "__done__";
-const ALL_ENTITY_KINDS: OmadeusInboundEntityKind[] = [
-  "task",
-  "nugget",
-  "project",
-  "release",
-  "sprint",
-  "summary",
-  "client",
-  "folder",
-];
-
-type CoreConfig = OpenClawConfig & {
-  channels?: { omadeus?: OmadeusChannelConfig };
-};
 
 type SelectOption = {
   value: string;
@@ -38,24 +26,17 @@ type SelectOption = {
   hint?: string;
 };
 
-type MultiSelectPrompter = {
-  multiSelect?: (args: {
-    message: string;
-    options: SelectOption[];
-    initialValues?: string[];
-    initialValue?: string[];
-  }) => Promise<string[]>;
-  multiselect?: (args: {
-    message: string;
-    options: SelectOption[];
-    initialValues?: string[];
-    initialValue?: string[];
-  }) => Promise<string[]>;
-};
+type MultiSelectFn = (args: {
+  message: string;
+  options: SelectOption[];
+  initialValues?: string[];
+  initialValue?: string[];
+}) => Promise<string[]>;
 
-function getOmadeusSection(cfg: OpenClawConfig): OmadeusChannelConfig | undefined {
-  return getOmadeusChannelConfig(cfg as CoreConfig);
-}
+type MultiSelectPrompter = {
+  multiSelect?: MultiSelectFn;
+  multiselect?: MultiSelectFn;
+};
 
 async function noteOmadeusAuthHelp(prompter: WizardPrompter): Promise<void> {
   await prompter.note(
@@ -80,35 +61,32 @@ async function promptOrganizationId(params: {
 }): Promise<number> {
   const { prompter, maestroUrl, email, existing } = params;
 
-  // Try to list organizations from the API
-  if (maestroUrl && email) {
-    try {
-      const orgs = await listOrganizations({ maestroUrl, email });
-      if (orgs.length > 0) {
-        if (orgs.length === 1) {
-          await prompter.note(
-            `Found organization: ${orgs[0]!.title} (${orgs[0]!.id})`,
-            "Omadeus organization",
-          );
-          return orgs[0]!.id;
-        }
-        const choice = await prompter.select({
-          message: "Select organization",
-          options: orgs.map((org) => ({
-            value: String(org.id),
-            label: `${org.title} (${org.membersCount} members)`,
-            hint: `ID: ${org.id}`,
-          })),
-          initialValue: existing ? String(existing) : String(orgs[0]!.id),
-        });
-        return Number(choice);
+  try {
+    const orgs = await listOrganizations({ maestroUrl, email });
+    if (orgs.length > 0) {
+      if (orgs.length === 1) {
+        await prompter.note(
+          `Found organization: ${orgs[0]!.title} (${orgs[0]!.id})`,
+          "Omadeus organization",
+        );
+        return orgs[0]!.id;
       }
-    } catch {
-      await prompter.note(
-        "Could not fetch organizations from the API. Enter the ID manually.",
-        "Omadeus organization",
-      );
+      const choice = await prompter.select({
+        message: "Select organization",
+        options: orgs.map((org) => ({
+          value: String(org.id),
+          label: `${org.title} (${org.membersCount} members)`,
+          hint: `ID: ${org.id}`,
+        })),
+        initialValue: existing ? String(existing) : String(orgs[0]!.id),
+      });
+      return Number(choice);
     }
+  } catch {
+    await prompter.note(
+      "Could not fetch organizations from the API. Enter the ID manually.",
+      "Omadeus organization",
+    );
   }
 
   const raw = await prompter.text({
@@ -162,20 +140,6 @@ async function promptChannelSelection(params: {
     throw new Error("At least one channel must be selected.");
   }
   return chosen;
-}
-
-function memberLabel(member: OmadeusOrganizationMember): string {
-  const fullName = `${member.firstName ?? ""} ${member.lastName ?? ""}`.trim();
-  if (member.title?.trim()) {
-    return member.title.trim();
-  }
-  if (fullName) {
-    return fullName;
-  }
-  if (member.email?.trim()) {
-    return member.email.trim();
-  }
-  return `Member ${member.referenceId}`;
 }
 
 function memberHint(member: OmadeusOrganizationMember): string | undefined {
@@ -241,13 +205,13 @@ async function loadSelectableMembers(params: {
     })
   )
     .filter((member) => member.isSystem !== true && !excluded.has(member.referenceId))
-    .sort((a, b) => memberLabel(a).localeCompare(memberLabel(b)));
+    .sort((a, b) => formatMemberLabel(a).localeCompare(formatMemberLabel(b)));
 }
 
 function memberOptions(members: OmadeusOrganizationMember[]): SelectOption[] {
   return members.map((member) => ({
     value: String(member.referenceId),
-    label: memberLabel(member),
+    label: formatMemberLabel(member),
     hint: memberHint(member),
   }));
 }
@@ -256,6 +220,27 @@ function readReferenceIds(values: string[]): number[] {
   return values
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function promptCredentials(
+  prompter: WizardPrompter,
+  existing: { email?: string; password?: string },
+): Promise<{ email: string; password: string }> {
+  const email = String(
+    await prompter.text({
+      message: "Omadeus username (email)",
+      initialValue: existing.email,
+      validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
+    }),
+  ).trim();
+  const password = String(
+    await prompter.text({
+      message: "Omadeus password",
+      initialValue: existing.password,
+      validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
+    }),
+  ).trim();
+  return { email, password };
 }
 
 async function promptSenderAllowlist(params: {
@@ -277,7 +262,7 @@ async function promptSenderAllowlist(params: {
     ],
     initialValue: existingReferenceIds && existingReferenceIds.length > 0 ? "specific" : "all",
   });
-  if (String(mode) === "all") {
+  if (mode === "all") {
     return undefined;
   }
 
@@ -297,16 +282,17 @@ async function promptEntityKindSelection(params: {
   const selected = await promptMultiSelect({
     prompter: params.prompter,
     message: "Which entity room types should OpenClaw listen to?",
-    options: ALL_ENTITY_KINDS.map((kind) => ({
+    options: OMADEUS_INBOUND_ENTITY_KINDS.map((kind) => ({
       value: kind,
       label: kind,
     })),
     initialValues:
       params.existingKinds && params.existingKinds.length > 0
         ? params.existingKinds
-        : ALL_ENTITY_KINDS,
+        : [...OMADEUS_INBOUND_ENTITY_KINDS],
   });
-  return ALL_ENTITY_KINDS.filter((kind) => selected.includes(kind));
+  const selectedSet = new Set(selected);
+  return OMADEUS_INBOUND_ENTITY_KINDS.filter((kind) => selectedSet.has(kind));
 }
 
 export const omadeusSetupWizard: ChannelSetupWizard = {
@@ -343,7 +329,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
   credentials: [],
   finalize: async ({ cfg, prompter }) => {
     const account = resolveOmadeusAccount({ cfg });
-    const section = getOmadeusSection(cfg) ?? {};
+    const section = getOmadeusChannelConfig(cfg) ?? {};
     let next = cfg;
 
     if (account.credentialSource === "none") {
@@ -356,21 +342,10 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
     const casUrl = OMADEUS_CAS_URL;
     const maestroUrl = OMADEUS_MAESTRO_URL;
 
-    let email = String(
-      await prompter.text({
-        message: "Omadeus username (email)",
-        initialValue: section.email ?? envEmail,
-        validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
-      }),
-    ).trim();
-
-    let password = String(
-      await prompter.text({
-        message: "Omadeus password",
-        initialValue: section.password ?? envPassword,
-        validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
-      }),
-    ).trim();
+    let { email, password } = await promptCredentials(prompter, {
+      email: section.email ?? envEmail,
+      password: section.password ?? envPassword,
+    });
 
     const organizationId = await promptOrganizationId({
       prompter,
@@ -379,7 +354,6 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       existing: section.organizationId,
     });
 
-    // Verify the full auth flow before saving
     let sessionToken: string | undefined;
     let selfReferenceId: number | undefined;
     while (true) {
@@ -409,20 +383,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
           );
           break;
         }
-        email = String(
-          await prompter.text({
-            message: "Omadeus email",
-            initialValue: email,
-            validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
-          }),
-        ).trim();
-        password = String(
-          await prompter.text({
-            message: "Omadeus password",
-            initialValue: password,
-            validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
-          }),
-        ).trim();
+        ({ email, password } = await promptCredentials(prompter, { email, password }));
       }
     }
 
@@ -516,7 +477,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
           email,
           password,
           organizationId,
-          ...(sessionToken ? { sessionToken } : {}),
+          sessionToken,
           inbound: {
             version: 1,
             direct: {
@@ -548,7 +509,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
     ...cfg,
     channels: {
       ...cfg.channels,
-      omadeus: { ...getOmadeusSection(cfg), enabled: false },
+      omadeus: { ...getOmadeusChannelConfig(cfg), enabled: false },
     },
   }),
 };

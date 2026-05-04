@@ -2,7 +2,7 @@ import { listOrganizationMembers } from "./api/auth.api.js";
 import type { OmadeusOrganizationMember } from "./types.js";
 import type { OmadeusApiOptions } from "./utils/http.util.js";
 
-function formatMemberLabel(m: OmadeusOrganizationMember): string {
+export function formatMemberLabel(m: OmadeusOrganizationMember): string {
   const fullName = `${m.firstName ?? ""} ${m.lastName ?? ""}`.trim();
   if (fullName) {
     return fullName;
