@@ -88,15 +88,18 @@ openclaw plugins doctor
 
 ## Local Development
 
-From this repository, you can link the local plugin into OpenClaw:
+Build the runtime files before linking a local checkout into OpenClaw:
 
 ```bash
+npm install
+npm run build
 openclaw plugins install . --link
 ```
 
 Before publishing, inspect the npm package contents:
 
 ```bash
+npm run prepack
 npm pack --dry-run
 ```
 

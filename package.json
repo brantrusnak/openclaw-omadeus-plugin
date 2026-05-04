@@ -14,15 +14,17 @@
   "license": "ISC",
   "author": "Brant Rusnak",
   "type": "module",
-  "main": "./index.ts",
+  "main": "./dist/index.js",
   "scripts": {
+    "build": "rolldown -c rolldown.config.mjs",
     "test": "vitest run",
-    "prepack": "node ./scripts/verify-npm-files.mjs"
+    "prepack": "npm run build && node ./scripts/verify-npm-files.mjs"
   },
   "dependencies": {
     "ws": "^8.20.0"
   },
   "files": [
+    "dist",
     "index.ts",
     "setup-entry.ts",
     "api.ts",
@@ -33,6 +35,7 @@
   ],
   "devDependencies": {
     "openclaw": ">=2026.4.10",
+    "rolldown": "1.0.0-rc.17",
     "vitest": "^4.1.5"
   },
   "peerDependencies": {
@@ -50,7 +53,11 @@
     "extensions": [
       "./index.ts"
     ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
     "setupEntry": "./setup-entry.ts",
+    "runtimeSetupEntry": "./dist/setup-entry.js",
     "channel": {
       "id": "omadeus",
       "label": "Omadeus",
