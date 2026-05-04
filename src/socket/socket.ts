@@ -31,10 +31,12 @@ const HEARTBEAT_MISSED_MAX = 5;
 const KEEP_ALIVE_CONTENT = "keep-alive";
 const KEEP_ALIVE_ACTION = "answer";
 
-function isKeepAliveMessage(data: Record<string, unknown>): boolean {
-  const content = (data as { content?: unknown }).content;
-  const payloadData = (data as { data?: unknown }).data;
-  return content === KEEP_ALIVE_CONTENT || payloadData === KEEP_ALIVE_CONTENT;
+function isServerKeepAlive(data: Record<string, unknown>): boolean {
+  return (data as { content?: unknown }).content === KEEP_ALIVE_CONTENT;
+}
+
+function isClientKeepAlive(data: Record<string, unknown>): boolean {
+  return (data as { data?: unknown }).data === KEEP_ALIVE_CONTENT;
 }
 
 export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSocketClient {
@@ -87,7 +89,7 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
       return;
     }
     heartbeatMissCount += 1;
-    ws.send(JSON.stringify({ data: KEEP_ALIVE_CONTENT, action: KEEP_ALIVE_ACTION }));
+    sendKeepAliveFrame();
 
     if (heartbeatMissCount >= HEARTBEAT_MISSED_MAX) {
       log?.warn(
@@ -102,6 +104,12 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
     heartbeatTimer = setInterval(() => {
       sendKeepAlive();
     }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function sendKeepAliveFrame() {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ data: KEEP_ALIVE_CONTENT, action: KEEP_ALIVE_ACTION }));
+    }
   }
 
   function connect() {
@@ -144,19 +152,24 @@ export function createOmadeusSocketClient(opts: OmadeusSocketOptions): OmadeusSo
         const data = JSON.parse(String(raw)) as Record<string, unknown>;
 
         const action = (data as { action?: unknown }).action;
-        if (isKeepAliveMessage(data) && action === KEEP_ALIVE_ACTION) {
+        if (isServerKeepAlive(data) && action === KEEP_ALIVE_ACTION) {
           resetHeartbeat();
           return;
         }
 
-        // If backend sends heartbeat pings, answer them immediately.
-        if (isKeepAliveMessage(data) && action === "heartbeat") {
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ data: KEEP_ALIVE_CONTENT, action: KEEP_ALIVE_ACTION }));
-          }
+        if (isClientKeepAlive(data) && action === KEEP_ALIVE_ACTION) {
+          resetHeartbeat();
           return;
         }
 
+        // If backend sends a heartbeat ping, answer it immediately.
+        if (isServerKeepAlive(data) && action === "heartbeat") {
+          resetHeartbeat();
+          sendKeepAliveFrame();
+          return;
+        }
+
+        resetHeartbeat();
         onEvent?.(data);
       } catch {
         log?.warn(`${logPrefix} unparseable message: ${String(raw).slice(0, 200)}`);
