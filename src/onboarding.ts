@@ -236,7 +236,7 @@ async function promptCredentials(
   const password = String(
     await prompter.text({
       message: "Omadeus password",
-      initialValue: existing.password,
+      sensitive: true,
       validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
     }),
   ).trim();
