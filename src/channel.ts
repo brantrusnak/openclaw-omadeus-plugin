@@ -28,6 +28,7 @@ import {
 } from "./api/nugget.api.js";
 import { addMessageReaction, deleteMessage, editMessage } from "./api/message.api.js";
 import {
+  getOmadeusChannelConfig,
   listOmadeusAccountIds,
   resolveDefaultOmadeusAccountId,
   resolveOmadeusAccount,
@@ -44,20 +45,27 @@ import { createJaguarSocketClient, type JaguarSocketClient } from "./socket/jagu
 import { createTokenManager, type OmadeusTokenManager } from "./token.js";
 import type { ResolvedOmadeusAccount as Account } from "./types.js";
 
-// Gateway-scoped state for the running account
-let activeTokenManager: OmadeusTokenManager | null = null;
-let activeDolphin: DolphinSocketClient | null = null;
-let activeJaguar: JaguarSocketClient | null = null;
+const CHANNEL_ID = "omadeus" as const;
+
+const gatewayState: {
+  tokenManager: OmadeusTokenManager | null;
+  dolphin: DolphinSocketClient | null;
+  jaguar: JaguarSocketClient | null;
+} = { tokenManager: null, dolphin: null, jaguar: null };
+
+const isUnconfigured = (account: Account) => account.credentialSource === "none";
+
+let lastPersistedToken: string | null = null;
 
 async function persistSessionToken(token: string): Promise<void> {
+  if (lastPersistedToken === token) return;
   const runtime = getOmadeusRuntime();
   const cfg = runtime.config.loadConfig();
-  const section = ((cfg.channels as Record<string, unknown> | undefined)?.["omadeus"] ??
-    {}) as Record<string, unknown>;
-  if (section["sessionToken"] === token) {
+  const section = getOmadeusChannelConfig(cfg) ?? {};
+  if (section.sessionToken === token) {
+    lastPersistedToken = token;
     return;
   }
-
   await runtime.config.writeConfigFile({
     ...cfg,
     channels: {
@@ -68,6 +76,22 @@ async function persistSessionToken(token: string): Promise<void> {
       },
     },
   } as OpenClawConfig);
+  lastPersistedToken = token;
+}
+
+function actionError(text: string, error = text) {
+  return {
+    isError: true as const,
+    content: [{ type: "text" as const, text }],
+    details: { error },
+  };
+}
+
+function actionOk(payload: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify({ ok: true, channel: CHANNEL_ID, ...payload }) }],
+    details: { ok: true, channel: CHANNEL_ID, ...payload },
+  };
 }
 
 const omadeusConfigAdapter = createTopLevelChannelConfigAdapter<Account>({
@@ -212,7 +236,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     describeMessageTool: ({ cfg }) => {
       const enabled =
         cfg.channels?.omadeus?.enabled !== false &&
-        resolveOmadeusAccount({ cfg }).credentialSource !== "none";
+        !isUnconfigured(resolveOmadeusAccount({ cfg }));
       return {
         actions: enabled ? ["send", "edit", "delete", "react"] : [],
         capabilities: [],
@@ -220,28 +244,19 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
       };
     },
     handleAction: async (ctx) => {
-      const apiOptsForAccount = () => {
-        const account = resolveOmadeusAccount({ cfg: ctx.cfg });
-        if (!activeTokenManager) {
+      const account = resolveOmadeusAccount({ cfg: ctx.cfg });
+      const apiOpts = () => {
+        if (!gatewayState.tokenManager) {
           throw new Error("Omadeus: not connected; gateway must be running with Omadeus enabled.");
         }
-        return { maestroUrl: account.maestroUrl, tokenManager: activeTokenManager };
+        return { maestroUrl: account.maestroUrl, tokenManager: gatewayState.tokenManager };
       };
 
       if (ctx.action === "send" && isCreateNuggetRequest(ctx.params)) {
         const title = readStringParam(ctx.params, ["title", "subject", "name"]);
         const description = readStringParam(ctx.params, ["description", "details", "body"]);
         if (!title || !description) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus create task/nugget requires `title` and `description`.",
-              },
-            ],
-            details: { error: "Missing title/description." },
-          };
+          return actionError("Omadeus create task/nugget requires `title` and `description`.", "Missing title/description.");
         }
 
         const kind = readNuggetKind(ctx.params);
@@ -249,25 +264,19 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         const stage = readStringParam(ctx.params, ["stage"]) ?? "Triage";
         const memberReferenceId =
           readNumberParam(ctx.params, ["memberReferenceId", "assigneeReferenceId"]) ??
-          activeTokenManager?.getPayload().referenceId;
+          gatewayState.tokenManager?.getPayload().referenceId;
         const clientId = readNumberParam(ctx.params, ["clientId"]) ?? 1;
         const folderId = readNumberParam(ctx.params, ["folderId"]) ?? 1;
 
         if (!memberReferenceId) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus create task/nugget needs `memberReferenceId` or an active authenticated user.",
-              },
-            ],
-            details: { error: "Missing memberReferenceId." },
-          };
+          return actionError(
+            "Omadeus create task/nugget needs `memberReferenceId` or an active authenticated user.",
+            "Missing memberReferenceId.",
+          );
         }
 
         try {
-          const created = await createNugget(apiOptsForAccount(), {
+          const created = await createNugget(apiOpts(), {
             title,
             description,
             stage,
@@ -277,39 +286,10 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
             clientId,
             folderId,
           });
-          const number = created["number"];
-          const id = created["id"];
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  ok: true,
-                  channel: "omadeus",
-                  action: "create",
-                  kind,
-                  number,
-                  id,
-                  title,
-                }),
-              },
-            ],
-            details: {
-              ok: true,
-              channel: "omadeus",
-              action: "create",
-              kind,
-              number,
-              id,
-            },
-          };
+          return actionOk({ action: "create", kind, number: created["number"], id: created["id"], title });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: msg }],
-            details: { error: msg },
-          };
+          return actionError(msg);
         }
       }
 
@@ -321,93 +301,47 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
           (typeof ctx.params.content === "string" && ctx.params.content.trim()) ||
           "";
         if (messageId == null) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus edit requires `messageId` (Jaguar message id) or current inbound MessageSid.",
-              },
-            ],
-            details: { error: "Missing messageId for edit." },
-          };
+          return actionError(
+            "Omadeus edit requires `messageId` (Jaguar message id) or current inbound MessageSid.",
+            "Missing messageId for edit.",
+          );
         }
         if (!body) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus edit requires new text in `message`, `text`, or `content`.",
-              },
-            ],
-            details: { error: "Missing body for edit." },
-          };
+          return actionError(
+            "Omadeus edit requires new text in `message`, `text`, or `content`.",
+            "Missing body for edit.",
+          );
         }
         try {
-          await editMessage(apiOptsForAccount(), { messageId, body });
+          await editMessage(apiOpts(), { messageId, body });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: msg }],
-            details: { error: msg },
-          };
+          return actionError(msg);
         }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ ok: true, channel: "omadeus", action: "edit", messageId }),
-            },
-          ],
-          details: { ok: true, channel: "omadeus", messageId },
-        };
+        return actionOk({ action: "edit", messageId });
       }
 
       if (ctx.action === "delete") {
         const messageId = readReactionMessageId(ctx.params, ctx.toolContext);
         if (messageId == null) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus delete requires `messageId` (Jaguar message id) or current inbound MessageSid.",
-              },
-            ],
-            details: { error: "Missing messageId for delete." },
-          };
+          return actionError(
+            "Omadeus delete requires `messageId` (Jaguar message id) or current inbound MessageSid.",
+            "Missing messageId for delete.",
+          );
         }
         try {
-          await deleteMessage(apiOptsForAccount(), { messageId });
+          await deleteMessage(apiOpts(), { messageId });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: msg }],
-            details: { error: msg },
-          };
+          return actionError(msg);
         }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ ok: true, channel: "omadeus", action: "delete", messageId }),
-            },
-          ],
-          details: { ok: true, channel: "omadeus", messageId },
-        };
+        return actionOk({ action: "delete", messageId });
       }
 
       if (ctx.action === "react") {
         const emoji = typeof ctx.params.emoji === "string" ? ctx.params.emoji.trim() : "";
         if (!emoji) {
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: "Omadeus react requires `emoji`." }],
-            details: { error: "Omadeus react requires emoji." },
-          };
+          return actionError("Omadeus react requires `emoji`.", "Omadeus react requires emoji.");
         }
         if (!isAllowedOmadeusReactionEmoji(emoji)) {
           return {
@@ -416,7 +350,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
                 type: "text" as const,
                 text: JSON.stringify({
                   ok: true,
-                  channel: "omadeus",
+                  channel: CHANNEL_ID,
                   ignored: true,
                   reason: "unsupported_emoji",
                   emoji,
@@ -424,84 +358,42 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
                 }),
               },
             ],
-            details: {
-              ok: true,
-              ignored: true,
-              channel: "omadeus",
-            },
+            details: { ok: true, ignored: true, channel: CHANNEL_ID },
           };
         }
         const messageId = readReactionMessageId(ctx.params, ctx.toolContext);
         if (messageId == null) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus react requires `messageId` or a current inbound message id (MessageSid).",
-              },
-            ],
-            details: { error: "Missing messageId for reaction." },
-          };
-        }
-        if (!activeTokenManager) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: "Omadeus is not connected; cannot react (gateway must be running).",
-              },
-            ],
-            details: { error: "Omadeus not connected." },
-          };
+          return actionError(
+            "Omadeus react requires `messageId` or a current inbound message id (MessageSid).",
+            "Missing messageId for reaction.",
+          );
         }
         try {
-          await addMessageReaction(apiOptsForAccount(), { messageId, emoji });
+          await addMessageReaction(apiOpts(), { messageId, emoji });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: msg }],
-            details: { error: msg },
-          };
+          return actionError(msg);
         }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                ok: true,
-                channel: "omadeus",
-                messageId,
-                emoji,
-              }),
-            },
-          ],
-          details: { ok: true, channel: "omadeus", messageId, emoji },
-        };
+        return actionOk({ messageId, emoji });
       }
-      // Return null to fall through to default handler
-      return null as never;
+
+      throw new Error(`Unhandled Omadeus action: ${String(ctx.action)}`);
     },
   },
   reload: { configPrefixes: ["channels.omadeus"] },
   setup: omadeusSetupAdapter,
   setupWizard: omadeusSetupWizard,
 
-  // -------------------------------------------------------------------------
-  // Config adapter
-  // -------------------------------------------------------------------------
   config: {
     ...omadeusConfigAdapter,
-    isConfigured: (account) => account.credentialSource !== "none",
+    isConfigured: (account) => !isUnconfigured(account),
     unconfiguredReason: () =>
       "Omadeus requires email, password, and organizationId. Run: openclaw setup omadeus",
     describeAccount: (account) => ({
       accountId: account.accountId,
       name: account.name,
       enabled: account.enabled,
-      configured: account.credentialSource !== "none",
+      configured: !isUnconfigured(account),
       credentialSource: account.credentialSource,
       baseUrl: account.maestroUrl,
     }),
@@ -519,13 +411,13 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         const id = normalizeOmadeusRoomId(input);
         if (!id) {
           const taskIntent = parseTaskChannelTargetIntent(input);
-          if (!taskIntent || !activeTokenManager) {
+          if (!taskIntent || !gatewayState.tokenManager) {
             return null;
           }
           const roomId = await resolveTaskRoomIdByNumber(
             {
               maestroUrl: resolveOmadeusAccount({ cfg }).maestroUrl,
-              tokenManager: activeTokenManager,
+              tokenManager: gatewayState.tokenManager,
             },
             { nuggetNumber: taskIntent.nuggetNumber },
           );
@@ -549,18 +441,15 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     },
   },
 
-  // -------------------------------------------------------------------------
-  // Outbound adapter
-  // -------------------------------------------------------------------------
   outbound: {
     deliveryMode: "direct",
     textChunkLimit: 4000,
     chunker: (text, limit) => getOmadeusRuntime().channel.text.chunkMarkdownText(text, limit),
     chunkerMode: "markdown",
     ...createAttachedChannelResultAdapter({
-      channel: "omadeus",
+      channel: CHANNEL_ID,
       sendText: async ({ cfg, to, text }) => {
-        if (!activeJaguar || !activeTokenManager) {
+        if (!gatewayState.jaguar || !gatewayState.tokenManager) {
           throw new Error("Omadeus: not connected. Is the gateway running with Omadeus enabled?");
         }
         const deps: OutboundDeps = {
@@ -568,9 +457,9 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
             maestroUrl: resolveOmadeusAccount({
               cfg,
             }).maestroUrl,
-            tokenManager: activeTokenManager,
+            tokenManager: gatewayState.tokenManager,
           },
-          jaguarSocket: activeJaguar,
+          jaguarSocket: gatewayState.jaguar,
         };
         return await sendOmadeusMessage(deps, { to, text });
       },
@@ -592,9 +481,6 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     },
   },
 
-  // -------------------------------------------------------------------------
-  // Status adapter
-  // -------------------------------------------------------------------------
   status: {
     defaultRuntime: defaultRuntimeState,
     collectStatusIssues: (accounts): ChannelStatusIssue[] =>
@@ -602,7 +488,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         const issues: ChannelStatusIssue[] = [];
         if (entry.enabled !== false && entry.configured !== true) {
           issues.push({
-            channel: "omadeus",
+            channel: CHANNEL_ID,
             accountId: String(entry.accountId ?? DEFAULT_ACCOUNT_ID),
             kind: "config",
             message: "Omadeus credentials are missing.",
@@ -625,7 +511,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         accountId: account.accountId,
         name: account.name,
         enabled: account.enabled,
-        configured: account.credentialSource !== "none",
+        configured: !isUnconfigured(account),
         runtime,
       }),
       baseUrl: account.maestroUrl,
@@ -635,15 +521,12 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
     }),
   },
 
-  // -------------------------------------------------------------------------
-  // Gateway adapter — starts sockets on gateway boot
-  // -------------------------------------------------------------------------
   gateway: {
     startAccount: async (ctx) => {
       const { account, cfg, abortSignal } = ctx;
       ctx.log?.info(`[omadeus] starting for org ${account.organizationId}`);
 
-      if (account.credentialSource === "none") {
+      if (isUnconfigured(account)) {
         ctx.log?.warn("[omadeus] skipping start: credentials not configured");
         ctx.setStatus({
           accountId: account.accountId,
@@ -665,8 +548,8 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
       }
 
       const log = ctx.log ?? { info: () => {}, warn: () => {}, error: () => {} };
+      let isConnected = false;
 
-      // Auth
       const tokenManager = createTokenManager({
         casUrl: account.casUrl,
         maestroUrl: account.maestroUrl,
@@ -696,7 +579,7 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
       }
 
       tokenManager.startAutoRefresh();
-      activeTokenManager = tokenManager;
+      gatewayState.tokenManager = tokenManager;
 
       const selfReferenceId = tokenManager.getPayload().referenceId;
 
@@ -713,7 +596,6 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         selfReferenceId,
       });
 
-      // Jaguar socket (chat — DMs, nugget/task/project rooms)
       const jaguar = createJaguarSocketClient({
         maestroUrl: account.maestroUrl,
         tokenManager,
@@ -742,17 +624,19 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         onOtherEvent: (data) => {
           log.info(`[jaguar] non-message event: ${JSON.stringify(data).slice(0, 120)}`);
         },
-        onConnect: () =>
-          ctx.setStatus({
-            accountId: account.accountId,
-            connected: true,
-            lastConnectedAt: Date.now(),
-          }),
-        onDisconnect: () => ctx.setStatus({ accountId: account.accountId, connected: false }),
+        onConnect: () => {
+          if (!isConnected) {
+            isConnected = true;
+            ctx.setStatus({ accountId: account.accountId, connected: true, lastConnectedAt: Date.now() });
+          }
+        },
+        onDisconnect: () => {
+          isConnected = false;
+          ctx.setStatus({ accountId: account.accountId, connected: false });
+        },
         onError: (err) => ctx.setStatus({ accountId: account.accountId, lastError: err.message }),
       });
 
-      // Dolphin socket (data — tasks, projects, sprints, releases)
       const dolphin = createDolphinSocketClient({
         maestroUrl: account.maestroUrl,
         tokenManager,
@@ -761,13 +645,16 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
           log.info(`[dolphin] event: ${JSON.stringify(data).slice(0, 120)}`);
           // TODO: handle task assignment/update events as they are discovered
         },
-        onConnect: () =>
-          ctx.setStatus({
-            accountId: account.accountId,
-            connected: true,
-            lastConnectedAt: Date.now(),
-          }),
-        onDisconnect: () => ctx.setStatus({ accountId: account.accountId, connected: false }),
+        onConnect: () => {
+          if (!isConnected) {
+            isConnected = true;
+            ctx.setStatus({ accountId: account.accountId, connected: true, lastConnectedAt: Date.now() });
+          }
+        },
+        onDisconnect: () => {
+          isConnected = false;
+          ctx.setStatus({ accountId: account.accountId, connected: false });
+        },
         onError: (err) => ctx.setStatus({ accountId: account.accountId, lastError: err.message }),
       });
 
@@ -776,8 +663,8 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
 
       jaguar.connect();
       dolphin.connect();
-      activeJaguar = jaguar;
-      activeDolphin = dolphin;
+      gatewayState.jaguar = jaguar;
+      gatewayState.dolphin = dolphin;
 
       ctx.setStatus({
         accountId: account.accountId,
@@ -792,9 +679,10 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         tokenManager.stopAutoRefresh();
         jaguar.disconnect();
         dolphin.disconnect();
-        activeTokenManager = null;
-        activeJaguar = null;
-        activeDolphin = null;
+        gatewayState.tokenManager = null;
+        gatewayState.jaguar = null;
+        gatewayState.dolphin = null;
+        lastPersistedToken = null;
         ctx.setStatus({
           accountId: account.accountId,
           running: false,
@@ -802,7 +690,6 @@ export const omadeusPlugin: ChannelPlugin<Account> = {
         });
       };
 
-      // Keep this account runner alive until the gateway aborts it.
       await new Promise<void>((resolve) => {
         if (abortSignal.aborted) {
           resolve();
