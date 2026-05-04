@@ -1,5 +1,10 @@
 # OpenClaw Omadeus Plugin
 
+[![Socket Badge](https://badge.socket.dev/npm/package/@brantrusnak/openclaw-omadeus)](https://badge.socket.dev/npm/package/@brantrusnak/openclaw-omadeus)
+[![CI](https://github.com/brantrusnak/openclaw-omadeus-plugin/actions/workflows/npm-publish.yml/badge.svg)](https://github.com/brantrusnak/openclaw-omadeus-plugin/actions/workflows/npm-publish.yml)
+[![npm version](https://img.shields.io/npm/v/@brantrusnak/openclaw-omadeus)](https://www.npmjs.com/package/@brantrusnak/openclaw-omadeus)
+[![License: ISC](https://img.shields.io/npm/l/@brantrusnak/openclaw-omadeus)](https://www.npmjs.com/package/@brantrusnak/openclaw-omadeus)
+
 [Omadeus](https://omadeus.com) plugin for [OpenClaw](https://www.npmjs.com/package/openclaw).
 
 This plugin connects OpenClaw to Omadeus over WebSocket so OpenClaw can listen
