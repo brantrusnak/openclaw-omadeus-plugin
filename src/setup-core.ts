@@ -35,12 +35,21 @@ export const omadeusSetupAdapter: ChannelSetupAdapter = {
     const password = input.password?.trim() || undefined;
     const organizationId = readSetupNumberField(rawInput, "organizationId");
 
+    const channelsRecord = cfg.channels as Record<string, unknown> | undefined;
+    const omadeusExisting = channelsRecord?.["omadeus"];
+    const omadeusPrevious =
+      omadeusExisting !== null &&
+      typeof omadeusExisting === "object" &&
+      !Array.isArray(omadeusExisting)
+        ? (omadeusExisting as Record<string, unknown>)
+        : {};
+
     return {
       ...cfg,
       channels: {
         ...cfg.channels,
         omadeus: {
-          ...(cfg.channels as Record<string, unknown>)?.["omadeus"],
+          ...omadeusPrevious,
           enabled: true,
           ...(casUrl ? { casUrl } : {}),
           ...(maestroUrl ? { maestroUrl } : {}),
