@@ -9,6 +9,27 @@ import type {
 const CAS_APPLICATION_ID = 1;
 const CAS_SCOPES = "title,email,avatar,firstName,lastName,birth,phone,countryCode";
 
+function formatFetchError(label: string, url: string, method: string, err: unknown): Error {
+  const base = err instanceof Error ? err.message : String(err);
+  const cause =
+    err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined;
+  const detail = cause && cause !== base ? `${base} (${cause})` : base;
+  return new Error(`${label} (${method} ${url}) failed: ${detail}`);
+}
+
+async function omadeusFetch(
+  label: string,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const method = init.method ?? "GET";
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    throw formatFetchError(label, url, method, err);
+  }
+}
+
 export async function createCasToken(params: {
   casUrl: string;
   email: string;
@@ -17,11 +38,10 @@ export async function createCasToken(params: {
   const { casUrl, email, password } = params;
   const url = `${casUrl}/apiv1/tokens`;
   const jsonBody = JSON.stringify({ email, password });
-  const res = await fetch(url, {
+  const res = await omadeusFetch("CAS token request", url, {
     method: "CREATE",
     headers: {
       "Content-Type": "application/json;charset=UTF-8",
-      "Content-Length": String(jsonBody.length),
     },
     body: jsonBody,
   });
@@ -44,7 +64,7 @@ export async function getMe(params: {
 }): Promise<{ email: string }> {
   const { casUrl, casToken, refreshCookie } = params;
   const url = `${casUrl}/apiv1/members/me`;
-  const res = await fetch(url, {
+  const res = await omadeusFetch("CAS get member", url, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${casToken}`,
@@ -80,7 +100,7 @@ export async function createAuthorizationCode(params: {
     Authorization: `Bearer ${token}`,
     ...(casSession?.refreshCookie ? { Cookie: casSession.refreshCookie } : {}),
   };
-  const res = await fetch(url, {
+  const res = await omadeusFetch("CAS authorization code request", url, {
     method: "CREATE",
     body,
     headers,
@@ -104,7 +124,7 @@ export async function obtainSessionToken(params: {
 }): Promise<string> {
   const { maestroUrl, authorizationCode, organizationId } = params;
   const url = `${maestroUrl}/dolphin/apiv1/oauth2/tokens`;
-  const res = await fetch(url, {
+  const res = await omadeusFetch("Omadeus session token request", url, {
     method: "OBTAIN",
     headers: { "Content-Type": "application/json;charset=UTF-8" },
     body: JSON.stringify({ authorizationCode, organizationId }),
@@ -126,7 +146,7 @@ export async function listOrganizations(params: {
 }): Promise<OmadeusOrganization[]> {
   const { maestroUrl, email } = params;
   const url = `${maestroUrl}/dolphin/apiv1/organizations`;
-  const res = await fetch(url, {
+  const res = await omadeusFetch("Omadeus list organizations", url, {
     method: "LIST",
     headers: { "Content-Type": "application/json;charset=UTF-8" },
     body: JSON.stringify({ email }),
@@ -145,7 +165,7 @@ export async function listOrganizationMembers(params: {
 }): Promise<OmadeusOrganizationMember[]> {
   const { maestroUrl, sessionToken, organizationId } = params;
   const url = `${maestroUrl}/dolphin/apiv1/organizations/${organizationId}/members`;
-  const res = await fetch(url, {
+  const res = await omadeusFetch("Omadeus list organization members", url, {
     method: "LIST",
     headers: {
       Authorization: `Bearer ${sessionToken}`,

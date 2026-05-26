@@ -18,7 +18,6 @@ import type {
 import { OMADEUS_INBOUND_ENTITY_KINDS } from "./types.js";
 
 const channel = "omadeus" as const;
-const DONE = "__done__";
 
 type SelectOption = {
   value: string;
@@ -26,17 +25,21 @@ type SelectOption = {
   hint?: string;
 };
 
-type MultiSelectFn = (args: {
-  message: string;
-  options: SelectOption[];
-  initialValues?: string[];
-  initialValue?: string[];
-}) => Promise<string[]>;
-
-type MultiSelectPrompter = {
-  multiSelect?: MultiSelectFn;
-  multiselect?: MultiSelectFn;
-};
+function formatAuthError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts = [err.message];
+  const { cause } = err;
+  if (cause instanceof Error) {
+    parts.push(cause.message);
+    const code = (cause as Error & { code?: unknown }).code;
+    if (typeof code === "string" && code) {
+      parts.push(`(${code})`);
+    }
+  } else if (typeof cause === "string" && cause.trim()) {
+    parts.push(cause);
+  }
+  return parts.join(" — ");
+}
 
 async function noteOmadeusAuthHelp(prompter: WizardPrompter): Promise<void> {
   await prompter.note(
@@ -118,8 +121,21 @@ async function promptChannelSelection(params: {
     take: 100,
   });
   if (channels.length === 0) {
-    throw new Error("No channels found for this account.");
+    await prompter.note(
+      "No channels found for this account. Channel listening will stay disabled.",
+      "Omadeus channels",
+    );
+    return [];
   }
+
+  const listenToChannels = await prompter.confirm({
+    message: "Listen for messages in Omadeus channels?",
+    initialValue: (existingChannelViewIds?.length ?? 0) > 0,
+  });
+  if (!listenToChannels) {
+    return [];
+  }
+
   const selected = await promptMultiSelect({
     prompter,
     message: "Which channels should OpenClaw listen to?",
@@ -133,13 +149,9 @@ async function promptChannelSelection(params: {
     initialValues:
       existingChannelViewIds && existingChannelViewIds.length > 0
         ? existingChannelViewIds.map(String)
-        : [String(channels[0]!.id)],
+        : undefined,
   });
-  const chosen = channels.filter((item) => selected.includes(String(item.id)));
-  if (chosen.length === 0) {
-    throw new Error("At least one channel must be selected.");
-  }
-  return chosen;
+  return channels.filter((item) => selected.includes(String(item.id)));
 }
 
 function memberHint(member: OmadeusOrganizationMember): string | undefined {
@@ -154,40 +166,11 @@ async function promptMultiSelect(params: {
   options: SelectOption[];
   initialValues?: string[];
 }): Promise<string[]> {
-  const multi = params.prompter as unknown as MultiSelectPrompter;
-  const runMulti = multi.multiSelect ?? multi.multiselect;
-  if (runMulti) {
-    return runMulti({
-      message: params.message,
-      options: params.options,
-      initialValues: params.initialValues,
-      initialValue: params.initialValues,
-    });
-  }
-
-  const selected = new Set(params.initialValues ?? []);
-  while (true) {
-    const next = await params.prompter.select({
-      message: `${params.message} (${selected.size} selected)`,
-      options: [
-        { value: DONE, label: selected.size > 0 ? "Done" : "Done (select none)" },
-        ...params.options.map((option) => ({
-          ...option,
-          label: selected.has(option.value) ? `[selected] ${option.label}` : option.label,
-        })),
-      ],
-      initialValue: DONE,
-    });
-    const value = String(next);
-    if (value === DONE) {
-      return [...selected];
-    }
-    if (selected.has(value)) {
-      selected.delete(value);
-    } else {
-      selected.add(value);
-    }
-  }
+  return params.prompter.multiselect({
+    message: params.message,
+    options: params.options,
+    initialValues: params.initialValues,
+  });
 }
 
 async function loadSelectableMembers(params: {
@@ -370,8 +353,10 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
         await prompter.note(`Authenticated as ${payload.email}`, "Omadeus authentication");
         break;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        await prompter.note(`Authentication failed: ${msg}`, "Omadeus authentication");
+        await prompter.note(
+          `Authentication failed: ${formatAuthError(err)}`,
+          "Omadeus authentication",
+        );
         const retry = await prompter.confirm({
           message: "Re-enter email/password and try again?",
           initialValue: true,
@@ -418,12 +403,15 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
       existingChannelViewIds: existingInbound?.channels?.allowedChannelViewIds,
     });
 
-    const channelSenderIds = await promptSenderAllowlist({
-      prompter,
-      message: "Which users can trigger OpenClaw from allowed channels?",
-      members,
-      existingReferenceIds: existingInbound?.channels?.allowedSenderReferenceIds,
-    });
+    const channelSenderIds =
+      selectedChannels.length > 0
+        ? await promptSenderAllowlist({
+            prompter,
+            message: "Which users can trigger OpenClaw from allowed channels?",
+            members,
+            existingReferenceIds: existingInbound?.channels?.allowedSenderReferenceIds,
+          })
+        : undefined;
 
     const entityKinds = await promptEntityKindSelection({
       prompter,
@@ -456,11 +444,16 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
     const entityKindSummary =
       entityKinds.length > 0 ? entityKinds.join(", ") : "none (entity rooms disabled)";
 
+    const channelSummary =
+      selectedChannels.length > 0
+        ? `- Channels "${channelTitles}": rooms ${channelRoomIds.join(", ") || "(no room ids)"} from ${senderSummary(channelSenderIds)}; @mention not required in those rooms.`
+        : "- Channels: disabled (none selected).";
+
     await prompter.note(
       [
         `Inbound policy (Jaguar chat):`,
         `- Direct messages: enabled for ${senderSummary(directSenderIds)} (no @mention required).`,
-        `- Channels "${channelTitles}": rooms ${channelRoomIds.join(", ") || "(no room ids)"} from ${senderSummary(channelSenderIds)}; @mention not required in those rooms.`,
+        channelSummary,
         `- Entity rooms (${entityKindSummary}): ${senderSummary(entitySenderIds)}; @mention required.`,
       ].join("\n"),
       "Omadeus inbound policy",
@@ -486,7 +479,7 @@ export const omadeusSetupWizard: ChannelSetupWizard = {
               requireMention: "never",
             },
             channels: {
-              enabled: true,
+              enabled: selectedChannels.length > 0,
               allowedRoomIds: channelRoomIds,
               allowedChannelViewIds: channelViewIds,
               ...(channelSenderIds ? { allowedSenderReferenceIds: channelSenderIds } : {}),
